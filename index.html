@@ -279,80 +279,188 @@
         }
 
         buildOpcodeTable() {
-          for (let i = 0; i < 65536; i++) {
-            this.opcodeTable[i] = this.opIllegal.bind(this);
-          }
+    for (let i = 0; i < 65536; i++) {
+        this.opcodeTable[i] = this.opIllegal.bind(this);
+    }
 
-          // --- BRA / BSR / Bcc ---
-          for (let cc = 0; cc < 16; cc++) {
-            for (let disp = 0; disp < 256; disp++) {
-              let op = 0x6000 | (cc << 8) | disp;
-              this.opcodeTable[op] = this.opBcc.bind(this);
-            }
-          }
-
-          // --- JSR ---
-          for (let mode = 0; mode < 8; mode++) {
-            for (let reg = 0; reg < 8; reg++) {
-              let op = 0x4e80 | (mode << 3) | reg;
-              this.opcodeTable[op] = this.opJSR.bind(this);
-            }
-          }
-
-          // --- RTS ---
-          this.opcodeTable[0x4e75] = this.opRTS.bind(this);
-
-          // MOVE.W (example)
-          for (let mode = 0; mode < 8; mode++) {
-            for (let reg = 0; reg < 8; reg++) {
-              let op = 0x3000 | (reg << 9) | (mode << 3);
-              this.opcodeTable[op] = this.opMOVE_W.bind(this);
-            }
-          }
-
-          // ADD.W Dn, Dn
-          for (let dx = 0; dx < 8; dx++) {
-            for (let dy = 0; dy < 8; dy++) {
-              let op = 0xd000 | (dy << 9) | dx;
-              this.opcodeTable[op] = this.opADD_W.bind(this);
-            }
-          }
+    // --- BRA / BSR / Bcc ---
+    for (let cc = 0; cc < 16; cc++) {
+        for (let disp = 0; disp < 256; disp++) {
+            let op = 0x6000 | (cc << 8) | disp;
+            this.opcodeTable[op] = this.opBcc.bind(this);
         }
+    }
+
+    // --- JSR ---
+    for (let mode = 0; mode < 8; mode++) {
+        for (let reg = 0; reg < 8; reg++) {
+            let op = 0x4e80 | (mode << 3) | reg;
+            this.opcodeTable[op] = this.opJSR.bind(this);
+        }
+    }
+
+    // --- RTS ---
+    this.opcodeTable[0x4e75] = this.opRTS.bind(this);
+
+    // --- MOVE.B/W/L (必要な EA のみ) ---
+    const sizes = [1,2,4];
+    const sizeBits = [1,3,2]; // B=01, W=11, L=10
+
+    for (let s = 0; s < 3; s++) {
+        for (let dstMode of [0,1,2,3,4,7]) {
+            for (let dstReg = 0; dstReg < 8; dstReg++) {
+                for (let srcMode of [0,1,2,3,4,7]) {
+                    for (let srcReg = 0; srcReg < 8; srcReg++) {
+
+                        let op =
+                            (sizeBits[s] << 12) |
+                            (dstReg << 9) |
+                            (dstMode << 6) |
+                            (srcMode << 3) |
+                            srcReg;
+
+                        this.opcodeTable[op] = this.opMOVE.bind(this);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- ADDQ / SUBQ / CLR / TST / CMP なども後で追加 ---
+}
+
 
         // ============================
         // Addressing Mode Decoder
         // ============================
-        decodeEA(mode, reg, size) {
-          switch (mode) {
-            case 0: // Dn
-              return {
-                read: () => this.D[reg] & (size === 2 ? 0xffff : 0xffffffff),
-                write: (v) => {
-                  this.D[reg] = v;
-                },
-              };
+decodeEA(mode, reg, size) {
+    const read = (addr) => {
+        if (size === 1) return this.bus.read8(addr);
+        if (size === 2) return this.bus.read16(addr);
+        if (size === 4) return this.bus.read32(addr);
+    };
 
-            case 1: // An
-              return {
+    const write = (addr, v) => {
+        if (size === 1) this.bus.write8(addr, v);
+        else if (size === 2) this.bus.write16(addr, v);
+        else if (size === 4) this.bus.write32(addr, v);
+    };
+
+    switch (mode) {
+
+        // -------------------------
+        // 0: Dn
+        // -------------------------
+        case 0:
+            return {
+                address: null,
+                read: () => {
+                    const mask = size === 1 ? 0xFF : size === 2 ? 0xFFFF : 0xFFFFFFFF;
+                    return this.D[reg] & mask;
+                },
+                write: (v) => {
+                    if (size === 1) {
+                        this.D[reg] = (this.D[reg] & 0xFFFFFF00) | (v & 0xFF);
+                    } else if (size === 2) {
+                        this.D[reg] = (this.D[reg] & 0xFFFF0000) | (v & 0xFFFF);
+                    } else {
+                        this.D[reg] = v >>> 0;
+                    }
+                }
+            };
+
+        // -------------------------
+        // 1: An
+        // -------------------------
+        case 1:
+            return {
+                address: null,
                 read: () => this.A[reg],
-                write: (v) => {
-                  this.A[reg] = v;
+                write: (v) => { this.A[reg] = v >>> 0; }
+            };
+
+        // -------------------------
+        // 2: (An)
+        // -------------------------
+        case 2:
+            return {
+                address: this.A[reg],
+                read: () => read(this.A[reg]),
+                write: (v) => write(this.A[reg], v)
+            };
+
+        // -------------------------
+        // 3: (An)+
+        // -------------------------
+        case 3: {
+            const addr = this.A[reg];
+            return {
+                address: addr,
+                read: () => {
+                    const v = read(addr);
+                    this.A[reg] += size;
+                    return v;
                 },
-              };
-
-            case 2: // (An)
-              return {
-                read: () => this.bus.read(size, this.A[reg]),
-                write: (v) => this.bus.write(size, this.A[reg], v),
-              };
-
-            default:
-              return {
-                read: () => 0,
-                write: () => {},
-              };
-          }
+                write: (v) => {
+                    write(addr, v);
+                    this.A[reg] += size;
+                }
+            };
         }
+
+        // -------------------------
+        // 4: -(An)
+        // -------------------------
+        case 4:
+            return {
+                address: this.A[reg] - size,
+                read: () => {
+                    this.A[reg] -= size;
+                    return read(this.A[reg]);
+                },
+                write: (v) => {
+                    this.A[reg] -= size;
+                    write(this.A[reg], v);
+                }
+            };
+
+        // -------------------------
+        // 5: d16(An)
+        // -------------------------
+        case 5: {
+            const disp = this.bus.read16(this.PC);
+            this.PC += 2;
+            const addr = (this.A[reg] + (disp << 16 >> 16)) >>> 0;
+            return {
+                address: addr,
+                read: () => read(addr),
+                write: (v) => write(addr, v)
+            };
+        }
+
+        // -------------------------
+        // 7: absolute 32bit
+        // -------------------------
+        case 7:
+            if (reg === 1) { // absolute long
+                const addr = this.bus.read32(this.PC) >>> 0;
+                this.PC += 4;
+                return {
+                    address: addr,
+                    read: () => read(addr),
+                    write: (v) => write(addr, v)
+                };
+            }
+            break;
+    }
+
+    // 未実装 EA
+    return {
+        address: null,
+        read: () => 0,
+        write: () => {}
+    };
+}
 
         // ============================
         // MOVE.W
