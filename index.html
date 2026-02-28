@@ -69,6 +69,131 @@ this.opcodeTable[opcode](opcode);
     }
     return false;
 }
+opMOVE(op) {
+    const sizeBits = (op >> 12) & 0x03;
+    let size = 0;
+    if (sizeBits === 1) size = 1; // MOVE.B
+    else if (sizeBits === 3) size = 2; // MOVE.W
+    else if (sizeBits === 2) size = 4; // MOVE.L
+
+    const srcMode = (op >> 3) & 7;
+    const srcReg  = op & 7;
+    const dstMode = (op >> 6) & 7;
+    const dstReg  = (op >> 9) & 7;
+
+    const src = this.decodeEA(srcMode, srcReg, size);
+    const dst = this.decodeEA(dstMode, dstReg, size);
+
+    const val = src.read();
+    dst.write(val);
+
+    this.updateNZ(val, size);
+}
+opMOVEQ(op) {
+    const reg = (op >> 9) & 7;
+    let imm = op & 0xFF;
+    if (imm & 0x80) imm |= 0xFFFFFF00; // sign extend
+
+    this.D[reg] = imm;
+
+    this.updateNZ(imm, 4);
+}
+opADD(op) {
+    const size = [1,2,4][(op >> 6) & 3];
+    const srcMode = (op >> 3) & 7;
+    const srcReg  = op & 7;
+    const dstReg  = (op >> 9) & 7;
+
+    const src = this.decodeEA(srcMode, srcReg, size);
+    const s = src.read();
+    const d = this.D[dstReg] & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
+
+    const r = (d + s) & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
+    this.D[dstReg] = (this.D[dstReg] & ~((1<<(size*8))-1)) | r;
+
+    this.updateNZ(r, size);
+}
+opSUB(op) {
+    const size = [1,2,4][(op >> 6) & 3];
+    const srcMode = (op >> 3) & 7;
+    const srcReg  = op & 7;
+    const dstReg  = (op >> 9) & 7;
+
+    const src = this.decodeEA(srcMode, srcReg, size);
+    const s = src.read();
+    const d = this.D[dstReg] & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
+
+    const r = (d - s) & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
+    this.D[dstReg] = (this.D[dstReg] & ~((1<<(size*8))-1)) | r;
+
+    this.updateNZ(r, size);
+}
+opCMP(op) {
+    const size = [1,2,4][(op >> 6) & 3];
+    const srcMode = (op >> 3) & 7;
+    const srcReg  = op & 7;
+    const dstReg  = (op >> 9) & 7;
+
+    const src = this.decodeEA(srcMode, srcReg, size);
+    const s = src.read();
+    const d = this.D[dstReg] & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
+
+    const r = (d - s) & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
+
+    this.updateNZ(r, size);
+}
+opCLR(op) {
+    const size = [1,2,4][(op >> 6) & 3];
+    const mode = (op >> 3) & 7;
+    const reg  = op & 7;
+
+    const ea = this.decodeEA(mode, reg, size);
+    ea.write(0);
+
+    this.updateNZ(0, size);
+}
+opTST(op) {
+    const size = [1,2,4][(op >> 6) & 3];
+    const mode = (op >> 3) & 7;
+    const reg  = op & 7;
+
+    const ea = this.decodeEA(mode, reg, size);
+    const val = ea.read();
+
+    this.updateNZ(val, size);
+}
+opLEA(op) {
+    const reg = (op >> 9) & 7;
+    const mode = (op >> 3) & 7;
+    const r = op & 7;
+
+    const ea = this.decodeEA(mode, r, 4);
+    const addr = ea.address; // decodeEA に address を持たせる
+
+    this.A[reg] = addr;
+}
+opPEA(op) {
+    const mode = (op >> 3) & 7;
+    const reg  = op & 7;
+
+    const ea = this.decodeEA(mode, reg, 4);
+    const addr = ea.address;
+
+    this.A[7] -= 4;
+    this.bus.write32(this.A[7], addr);
+}
+opLSL(op) {
+    const size = [1,2,4][(op >> 6) & 3];
+    const reg = op & 7;
+
+    let val = this.D[reg] & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
+    val = (val << 1) & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
+
+    this.D[reg] = (this.D[reg] & ~((1<<(size*8))-1)) | val;
+
+    this.updateNZ(val, size);
+}
+
 opBcc(op) {
     let cc = (op >> 8) & 0x0F;
     let disp8 = op & 0xFF;
@@ -265,13 +390,63 @@ class VDP {
     constructor(ctx, bus) {
         this.ctx = ctx;
         this.bus = bus;
+
+        this.vram = new Uint8Array(0x10000);  // 64KB
+        this.cram = new Uint8Array(0x80);     // 128B
+        this.vsram = new Uint8Array(0x50);    // 80B
+        this.reg = new Uint8Array(0x20);      // 24 registers
+
+        this.controlWord = 0;
+        this.address = 0;
+        this.code = 0;
+
         this.imageData = ctx.createImageData(320, 224);
     }
 
-    reset() {}
+    reset() {
+        this.controlWord = 0;
+        this.address = 0;
+        this.code = 0;
+    }
 
+    // ============================
+    // VDP ポート読み書き
+    // ============================
+    readPort(port) {
+        if (port === 4) {
+            return 0x3400; // VDP status (最低限)
+        }
+        return 0;
+    }
+
+    writePort(port, val) {
+        if (port === 0) {
+            // VRAM write
+            if (this.code === 1) {
+                this.vram[this.address & 0xFFFF] = val;
+                this.address++;
+            }
+            return;
+        }
+
+        if (port === 4) {
+            // Control port
+            this.controlWord = (this.controlWord << 8) | val;
+
+            if (this.controlWord & 0x8000) {
+                this.code = (this.controlWord >> 14) & 3;
+                this.address = this.controlWord & 0x3FFF;
+                this.controlWord = 0;
+            }
+            return;
+        }
+    }
+
+    // ============================
+    // 1フレーム描画（BG A のみ）
+    // ============================
     renderFrame() {
-        // まだ描画なし → 黒画面
+        // とりあえず黒画面
         for (let i = 0; i < this.imageData.data.length; i += 4) {
             this.imageData.data[i] = 0;
             this.imageData.data[i+1] = 0;
@@ -281,6 +456,7 @@ class VDP {
         this.ctx.putImageData(this.imageData, 0, 0);
     }
 }
+
 class Bus {
     constructor() {
         this.rom = new Uint8Array(0);
