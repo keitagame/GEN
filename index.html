@@ -10,27 +10,239 @@
 </head>
 <body>
 
-<h2>MegaDrive Emulator Skeleton</h2>
+<div id="pc">0x0000</div>
 
 <input type="file" id="romInput" accept=".bin,.md,.gen">
 <canvas id="screen" width="320" height="224"></canvas>
 <script>
 class CPU68K {
     constructor(bus) {
-        this.bus = bus;
-        this.pc = 0;
+       this.bus = bus; this.D = new Uint32Array(8); // データレジスタ 
+this.A = new Uint32Array(8); // アドレスレジスタ 
+this.PC = 0; this.SR = 0x2700; // Supervisor + IRQ mask 
+this.opcodeTable = new Array(65536); 
+this.buildOpcodeTable();
+
     }
 
     reset() {
+let initialSP =0; //this.bus.read32(0); 
+let initialPC =0x000004;// this.bus.read32(4); 
+this.A[7] = initialSP; 
+this.PC = initialPC;
         // リセットベクタを読む（0x000000 に初期SP、0x000004 に初期PC）
-        this.pc = (this.bus.read16(4) << 16) | this.bus.read16(6);
+        //this.pc = (this.bus.read16(4) << 16) | this.bus.read16(6);
     }
 
     step() {
         // まだ命令実装なし
-        let opcode = this.bus.read16(this.pc);
-        console.log("68K opcode:", opcode.toString(16));
-        this.pc += 2;
+let opcode = this.bus.read16(this.PC);
+this.PC += 2; 
+this.opcodeTable[opcode](opcode);
+        //let opcode = this.bus.read16(this.pc);
+        //console.log("68K opcode:", opcode.toString(16));
+        //this.pc += 2;
+    }
+    checkCondition(cc) {
+    let N = (this.SR >> 3) & 1;
+    let Z = (this.SR >> 2) & 1;
+    let V = (this.SR >> 1) & 1;
+    let C = (this.SR >> 0) & 1;
+
+    switch (cc) {
+        case 0: return true;      // BRA (always)
+        case 1: return false;     // BSR (handled separately)
+        case 2: return !C;        // BHI
+        case 3: return C;         // BLS
+        case 4: return !C && !Z;  // BCC
+        case 5: return C || Z;    // BCS
+        case 6: return !Z;        // BNE
+        case 7: return Z;         // BEQ
+        case 8: return !V;        // BVC
+        case 9: return V;         // BVS
+        case 10: return !N;       // BPL
+        case 11: return N;        // BMI
+        case 12: return N === V;  // BGE
+        case 13: return N !== V;  // BLT
+        case 14: return !Z && (N === V); // BGT
+        case 15: return Z || (N !== V);  // BLE
+    }
+    return false;
+}
+opBcc(op) {
+    let cc = (op >> 8) & 0x0F;
+    let disp8 = op & 0xFF;
+
+    // 8bit displacement は signed
+    if (disp8 === 0) {
+        // 16bit displacement
+        disp8 = this.bus.read16(this.PC);
+        this.PC += 2;
+        if (disp8 & 0x8000) disp8 |= 0xFFFF0000;
+    } else {
+        if (disp8 & 0x80) disp8 |= 0xFFFFFF00;
+    }
+
+    // BSR（cc=1）は特別扱い
+    if (cc === 1) {
+        // push return address
+        this.A[7] -= 4;
+        this.bus.write32(this.A[7], this.PC);
+        this.PC += disp8;
+        return;
+    }
+
+    // BRA / Bcc
+    if (this.checkCondition(cc)) {
+        this.PC += disp8;
+    }
+}
+opJSR(op) {
+    let mode = (op >> 3) & 7;
+    let reg  = op & 7;
+
+    let ea = this.decodeEA(mode, reg, 4);
+    let addr = ea.read();
+
+    // push return address
+    this.A[7] -= 4;
+    this.bus.write32(this.A[7], this.PC);
+
+    this.PC = addr;
+}
+opRTS(op) {
+    let ret = this.bus.read32(this.A[7]);
+    this.A[7] += 4;
+    this.PC = ret;
+}
+
+    buildOpcodeTable() {
+      for (let i = 0; i < 65536; i++) {
+        this.opcodeTable[i] = this.opIllegal.bind(this);
+    }
+
+    // --- BRA / BSR / Bcc ---
+    for (let cc = 0; cc < 16; cc++) {
+        for (let disp = 0; disp < 256; disp++) {
+            let op = 0x6000 | (cc << 8) | disp;
+            this.opcodeTable[op] = this.opBcc.bind(this);
+        }
+    }
+
+    // --- JSR ---
+    for (let mode = 0; mode < 8; mode++) {
+        for (let reg = 0; reg < 8; reg++) {
+            let op = 0x4E80 | (mode << 3) | reg;
+            this.opcodeTable[op] = this.opJSR.bind(this);
+        }
+    }
+
+    // --- RTS ---
+    this.opcodeTable[0x4E75] = this.opRTS.bind(this);
+      
+
+        // MOVE.W (example)
+        for (let mode = 0; mode < 8; mode++) {
+            for (let reg = 0; reg < 8; reg++) {
+                let op = 0x3000 | (reg << 9) | (mode << 3);
+                this.opcodeTable[op] = this.opMOVE_W.bind(this);
+            }
+        }
+
+        // ADD.W Dn, Dn
+        for (let dx = 0; dx < 8; dx++) {
+            for (let dy = 0; dy < 8; dy++) {
+                let op = 0xD000 | (dy << 9) | dx;
+                this.opcodeTable[op] = this.opADD_W.bind(this);
+            }
+        }
+    }
+
+    // ============================
+    // Addressing Mode Decoder
+    // ============================
+    decodeEA(mode, reg, size) {
+        switch (mode) {
+            case 0: // Dn
+                return {
+                    read: () => this.D[reg] & ((size === 2) ? 0xFFFF : 0xFFFFFFFF),
+                    write: (v) => { this.D[reg] = v; }
+                };
+
+            case 1: // An
+                return {
+                    read: () => this.A[reg],
+                    write: (v) => { this.A[reg] = v; }
+                };
+
+            case 2: // (An)
+                return {
+                    read: () => this.bus.read(size, this.A[reg]),
+                    write: (v) => this.bus.write(size, this.A[reg], v)
+                };
+
+            default:
+               
+                return {
+                    read: () => 0,
+                    write: () => {}
+                };
+        }
+    }
+
+    // ============================
+    // MOVE.W
+    // ============================
+    opMOVE_W(op) {
+        let srcMode = (op >> 3) & 7;
+        let srcReg  = op & 7;
+        let dstReg  = (op >> 9) & 7;
+
+        let src = this.decodeEA(srcMode, srcReg, 2);
+        let val = src.read();
+
+        this.D[dstReg] = (this.D[dstReg] & 0xFFFF0000) | (val & 0xFFFF);
+
+        this.updateNZ(val, 2);
+    }
+
+    // ============================
+    // ADD.W Dn, Dn
+    // ============================
+    opADD_W(op) {
+        let src = op & 7;
+        let dst = (op >> 9) & 7;
+
+        let s = this.D[src] & 0xFFFF;
+        let d = this.D[dst] & 0xFFFF;
+
+        let r = (d + s) & 0xFFFF;
+        this.D[dst] = (this.D[dst] & 0xFFFF0000) | r;
+
+        this.updateNZ(r, 2);
+        // 本来は X, C, V も更新
+    }
+
+    // ============================
+    // Illegal Instruction
+    // ============================
+    opIllegal(op) {
+       
+    }
+
+    // ============================
+    // CCR Update
+    // ============================
+    updateNZ(val, size) {
+        let mask = (size === 2) ? 0x8000 : 0x80000000;
+        let zero = (val === 0);
+
+        // Clear N/Z
+        this.SR &= ~0x04; // Z
+        this.SR &= ~0x08; // N
+
+        if (zero) this.SR |= 0x04;
+        if (val & mask) this.SR |= 0x08;
     }
 }
 class CPUZ80 {
@@ -45,7 +257,7 @@ class CPUZ80 {
 
     step() {
         let opcode = this.bus.read8(this.pc);
-        console.log("Z80 opcode:", opcode.toString(16));
+       
         this.pc += 1;
     }
 }
@@ -72,23 +284,118 @@ class VDP {
 class Bus {
     constructor() {
         this.rom = new Uint8Array(0);
-        this.ram = new Uint8Array(0x10000); // 64KB
+        this.ram68k = new Uint8Array(0x10000); // FF0000-FFFFFF (64KB)
+        this.z80ram = new Uint8Array(0x2000);  // A00000-A01FFF (8KB)
+
+        this.vdp = null;   // 後で VDP インスタンスを渡す
+        this.io = new Uint8Array(0x20); // A10000-A1001F
+    }
+
+    connectVDP(vdp) {
+        this.vdp = vdp;
     }
 
     loadROM(data) {
         this.rom = data;
     }
 
+    // ============================
+    // 8bit Read
+    // ============================
     read8(addr) {
         addr &= 0xFFFFFF;
-        if (addr < this.rom.length) return this.rom[addr];
+
+        // ROM 0x000000 - 0x3FFFFF
+        if (addr < this.rom.length) {
+            return this.rom[addr];
+        }
+
+        // 68K RAM 0xFF0000 - 0xFFFFFF
+        if (addr >= 0xFF0000) {
+            return this.ram68k[addr & 0xFFFF];
+        }
+
+        // Z80 RAM 0xA00000 - 0xA01FFF
+        if (addr >= 0xA00000 && addr <= 0xA01FFF) {
+            return this.z80ram[addr & 0x1FFF];
+        }
+
+        // IO 0xA10000 - 0xA1001F
+        if (addr >= 0xA10000 && addr <= 0xA1001F) {
+            return this.io[addr & 0x1F];
+        }
+
+        // VDP 0xC00000 - 0xC0001F
+        if (addr >= 0xC00000 && addr <= 0xC0001F) {
+            return this.vdp ? this.vdp.readPort(addr & 0x1F) : 0;
+        }
+
         return 0;
     }
 
+    // ============================
+    // 16bit Read
+    // ============================
     read16(addr) {
         return (this.read8(addr) << 8) | this.read8(addr + 1);
     }
+
+    // ============================
+    // 32bit Read
+    // ============================
+    read32(addr) {
+        return (this.read16(addr) << 16) | this.read16(addr + 2);
+    }
+
+    // ============================
+    // 8bit Write
+    // ============================
+    write8(addr, val) {
+        addr &= 0xFFFFFF;
+        val &= 0xFF;
+
+        // 68K RAM
+        if (addr >= 0xFF0000) {
+            this.ram68k[addr & 0xFFFF] = val;
+            return;
+        }
+
+        // Z80 RAM
+        if (addr >= 0xA00000 && addr <= 0xA01FFF) {
+            this.z80ram[addr & 0x1FFF] = val;
+            return;
+        }
+
+        // IO
+        if (addr >= 0xA10000 && addr <= 0xA1001F) {
+            this.io[addr & 0x1F] = val;
+            return;
+        }
+
+        // VDP
+        if (addr >= 0xC00000 && addr <= 0xC0001F) {
+            if (this.vdp) this.vdp.writePort(addr & 0x1F, val);
+            return;
+        }
+    }
+
+    // ============================
+    // 16bit Write
+    // ============================
+    write16(addr, val) {
+        this.write8(addr, val >> 8);
+        this.write8(addr + 1, val & 0xFF);
+    }
+
+    // ============================
+    // 32bit Write
+    // ============================
+    write32(addr, val) {
+        this.write16(addr, val >> 16);
+        this.write16(addr + 2, val & 0xFFFF);
+    }
 }
+
 
 let canvas = document.getElementById("screen");
 let ctx = canvas.getContext("2d");
@@ -117,7 +424,7 @@ function frame() {
     // 1フレーム中に 68000 と Z80 を一定サイクル回す
     for (let i = 0; i < 200000; i++) cpu68k.step();
     for (let i = 0; i < 50000; i++) cpuZ80.step();
-
+document.getElementById("pc").textContent=cpu68k.PC.toString(16);
     vdp.renderFrame();
     requestAnimationFrame(frame);
 }
