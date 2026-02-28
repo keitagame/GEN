@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>MegaDrive Emulator Skeleton</title>
+<style>
+  body { background:#111; color:#eee; font-family:monospace; }
+  canvas { border:1px solid #555; image-rendering:pixelated; }
+</style>
+</head>
+<body>
+
+<h2>MegaDrive Emulator Skeleton</h2>
+
+<input type="file" id="romInput" accept=".bin,.md,.gen">
+<canvas id="screen" width="320" height="224"></canvas>
+<script>
+class CPU68K {
+    constructor(bus) {
+        this.bus = bus;
+        this.pc = 0;
+    }
+
+    reset() {
+        // リセットベクタを読む（0x000000 に初期SP、0x000004 に初期PC）
+        this.pc = (this.bus.read16(4) << 16) | this.bus.read16(6);
+    }
+
+    step() {
+        // まだ命令実装なし
+        let opcode = this.bus.read16(this.pc);
+        console.log("68K opcode:", opcode.toString(16));
+        this.pc += 2;
+    }
+}
+class CPUZ80 {
+    constructor(bus) {
+        this.bus = bus;
+        this.pc = 0;
+    }
+
+    reset() {
+        this.pc = 0x0000;
+    }
+
+    step() {
+        let opcode = this.bus.read8(this.pc);
+        console.log("Z80 opcode:", opcode.toString(16));
+        this.pc += 1;
+    }
+}
+class VDP {
+    constructor(ctx, bus) {
+        this.ctx = ctx;
+        this.bus = bus;
+        this.imageData = ctx.createImageData(320, 224);
+    }
+
+    reset() {}
+
+    renderFrame() {
+        // まだ描画なし → 黒画面
+        for (let i = 0; i < this.imageData.data.length; i += 4) {
+            this.imageData.data[i] = 0;
+            this.imageData.data[i+1] = 0;
+            this.imageData.data[i+2] = 0;
+            this.imageData.data[i+3] = 255;
+        }
+        this.ctx.putImageData(this.imageData, 0, 0);
+    }
+}
+class Bus {
+    constructor() {
+        this.rom = new Uint8Array(0);
+        this.ram = new Uint8Array(0x10000); // 64KB
+    }
+
+    loadROM(data) {
+        this.rom = data;
+    }
+
+    read8(addr) {
+        addr &= 0xFFFFFF;
+        if (addr < this.rom.length) return this.rom[addr];
+        return 0;
+    }
+
+    read16(addr) {
+        return (this.read8(addr) << 8) | this.read8(addr + 1);
+    }
+}
+
+let canvas = document.getElementById("screen");
+let ctx = canvas.getContext("2d");
+
+let bus = new Bus();
+let cpu68k = new CPU68K(bus);
+let cpuZ80 = new CPUZ80(bus);
+let vdp = new VDP(ctx, bus);
+
+document.getElementById("romInput").addEventListener("change", async (e) => {
+    let file = e.target.files[0];
+    let buffer = await file.arrayBuffer();
+    bus.loadROM(new Uint8Array(buffer));
+    reset();
+});
+
+function reset() {
+    cpu68k.reset();
+    cpuZ80.reset();
+    vdp.reset();
+frame();
+}
+
+function frame() {
+    // MegaDrive は 1 フレーム ≒ 60Hz
+    // 1フレーム中に 68000 と Z80 を一定サイクル回す
+    for (let i = 0; i < 200000; i++) cpu68k.step();
+    for (let i = 0; i < 50000; i++) cpuZ80.step();
+
+    vdp.renderFrame();
+    requestAnimationFrame(frame);
+}
+
+
+
+</script>
+
+</body>
+</html>
