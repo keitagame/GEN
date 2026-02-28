@@ -5,21 +5,30 @@
     <title>MegaDrive Emulator Skeleton</title>
     <style>
       body {
-        background: #111;
+        background: #000000;
         color: #eee;
         font-family: monospace;
       }
+      .s{
+        display:flex;
+        align-items:center;
+      justify-content:center;
+        text-align:center;
+      }
       canvas {
+        width:50%;
         border: 1px solid #555;
         image-rendering: pixelated;
       }
     </style>
   </head>
   <body>
-    <div id="pc">0x0000</div>
+   
 
-    <input type="file" id="romInput" accept=".bin,.md,.gen" />
+     <div class="s"><input type="file" id="romInput" accept=".bin,.md,.gen" /> <div id="pc">0x0000</div></div>
+    <div class="s">
     <canvas id="screen" width="320" height="224"></canvas>
+</div>
     <script>
       class CPU68K {
         constructor(bus) {
@@ -540,6 +549,8 @@ decodeEA(mode, reg, size) {
           this.cram = new Uint8Array(0x80); // 128B
           this.vsram = new Uint8Array(0x50); // 80B
           this.reg = new Uint8Array(0x20); // 24 registers
+this.controlLatch = 0;
+this.controlCount = 0;
 
           this.controlWord = 0;
           this.address = 0;
@@ -621,6 +632,7 @@ decodeEA(mode, reg, size) {
           return [(r * 255) / 7, (g * 255) / 7, (b * 255) / 7];
         }
         renderFrame() {
+          console.log("VRAM[0..64] =", this.vram.slice(0, 64)); console.log("CRAM[0..16] =", this.cram.slice(0, 16)); console.log("reg2 =", this.reg[2]);
           const w = 320;
           const h = 224;
           const data = this.imageData.data; // Plane A ネームテーブルベース（reg2）
@@ -713,9 +725,14 @@ decodeEA(mode, reg, size) {
           }
 
           // VDP 0xC00000 - 0xC0001F
-          if (addr >= 0xc00000 && addr <= 0xc0001f) {
-            return this.vdp ? this.vdp.readPort(addr & 0x1f) : 0;
-          }
+          // ============================
+// 8bit Read
+// ============================
+if (addr >= 0xc00000 && addr <= 0xc0001f) {
+    const port = (addr & 0x1f) & ~1;   // ★ 偶数に丸める
+    return this.vdp ? this.vdp.readPort(port) : 0;
+}
+
 
           return 0;
         }
@@ -760,10 +777,15 @@ decodeEA(mode, reg, size) {
           }
 
           // VDP
-          if (addr >= 0xc00000 && addr <= 0xc0001f) {
-            if (this.vdp) this.vdp.writePort(addr & 0x1f, val);
-            return;
-          }
+          // ============================
+// 8bit Write
+// ============================
+if (addr >= 0xc00000 && addr <= 0xc0001f) {
+    const port = (addr & 0x1f) & ~1;   // ★ 偶数に丸める
+    if (this.vdp) this.vdp.writePort(port, val);
+    return;
+}
+
         }
 
         // ============================
@@ -803,7 +825,11 @@ decodeEA(mode, reg, size) {
       function reset() {
         cpu68k.reset();
         cpuZ80.reset();
+        for (let i = 0; i < 32; i++) vdp.vram[i] = 0xff; vdp.cram[2] = 0x0e; vdp.cram[3] = 0x0e; vdp.vram[0] = 0x00; vdp.vram[1] = 0x00;
         vdp.reset();
+        // タイル0を全部「色1」にする
+
+
         frame();
       }
 
@@ -813,6 +839,9 @@ decodeEA(mode, reg, size) {
         for (let i = 0; i < 200000; i++) cpu68k.step();
         for (let i = 0; i < 50000; i++) cpuZ80.step();
         document.getElementById("pc").textContent = cpu68k.PC.toString(16);
+        // タイル0を全部「色1」にする
+
+
         vdp.renderFrame();
         requestAnimationFrame(frame);
       }
