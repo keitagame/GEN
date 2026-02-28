@@ -1,613 +1,713 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
-<head>
-<meta charset="UTF-8">
-<title>MegaDrive Emulator Skeleton</title>
-<style>
-  body { background:#111; color:#eee; font-family:monospace; }
-  canvas { border:1px solid #555; image-rendering:pixelated; }
-</style>
-</head>
-<body>
+  <head>
+    <meta charset="UTF-8" />
+    <title>MegaDrive Emulator Skeleton</title>
+    <style>
+      body {
+        background: #111;
+        color: #eee;
+        font-family: monospace;
+      }
+      canvas {
+        border: 1px solid #555;
+        image-rendering: pixelated;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="pc">0x0000</div>
 
-<div id="pc">0x0000</div>
-
-<input type="file" id="romInput" accept=".bin,.md,.gen">
-<canvas id="screen" width="320" height="224"></canvas>
-<script>
-class CPU68K {
-    constructor(bus) {
-       this.bus = bus; this.D = new Uint32Array(8); // データレジスタ 
-this.A = new Uint32Array(8); // アドレスレジスタ 
-this.PC = 0; this.SR = 0x2700; // Supervisor + IRQ mask 
-this.opcodeTable = new Array(65536); 
-this.buildOpcodeTable();
-
-    }
-
-    reset() {
-let initialSP =0; //this.bus.read32(0); 
-let initialPC =0x000004;// this.bus.read32(4); 
-this.A[7] = initialSP; 
-this.PC = initialPC;
-        // リセットベクタを読む（0x000000 に初期SP、0x000004 に初期PC）
-        //this.pc = (this.bus.read16(4) << 16) | this.bus.read16(6);
-    }
-
-    step() {
-        // まだ命令実装なし
-let opcode = this.bus.read16(this.PC);
-this.PC += 2; 
-this.opcodeTable[opcode](opcode);
-        //let opcode = this.bus.read16(this.pc);
-        //console.log("68K opcode:", opcode.toString(16));
-        //this.pc += 2;
-    }
-    checkCondition(cc) {
-    let N = (this.SR >> 3) & 1;
-    let Z = (this.SR >> 2) & 1;
-    let V = (this.SR >> 1) & 1;
-    let C = (this.SR >> 0) & 1;
-
-    switch (cc) {
-        case 0: return true;      // BRA (always)
-        case 1: return false;     // BSR (handled separately)
-        case 2: return !C;        // BHI
-        case 3: return C;         // BLS
-        case 4: return !C && !Z;  // BCC
-        case 5: return C || Z;    // BCS
-        case 6: return !Z;        // BNE
-        case 7: return Z;         // BEQ
-        case 8: return !V;        // BVC
-        case 9: return V;         // BVS
-        case 10: return !N;       // BPL
-        case 11: return N;        // BMI
-        case 12: return N === V;  // BGE
-        case 13: return N !== V;  // BLT
-        case 14: return !Z && (N === V); // BGT
-        case 15: return Z || (N !== V);  // BLE
-    }
-    return false;
-}
-opMOVE(op) {
-    const sizeBits = (op >> 12) & 0x03;
-    let size = 0;
-    if (sizeBits === 1) size = 1; // MOVE.B
-    else if (sizeBits === 3) size = 2; // MOVE.W
-    else if (sizeBits === 2) size = 4; // MOVE.L
-
-    const srcMode = (op >> 3) & 7;
-    const srcReg  = op & 7;
-    const dstMode = (op >> 6) & 7;
-    const dstReg  = (op >> 9) & 7;
-
-    const src = this.decodeEA(srcMode, srcReg, size);
-    const dst = this.decodeEA(dstMode, dstReg, size);
-
-    const val = src.read();
-    dst.write(val);
-
-    this.updateNZ(val, size);
-}
-opMOVEQ(op) {
-    const reg = (op >> 9) & 7;
-    let imm = op & 0xFF;
-    if (imm & 0x80) imm |= 0xFFFFFF00; // sign extend
-
-    this.D[reg] = imm;
-
-    this.updateNZ(imm, 4);
-}
-opADD(op) {
-    const size = [1,2,4][(op >> 6) & 3];
-    const srcMode = (op >> 3) & 7;
-    const srcReg  = op & 7;
-    const dstReg  = (op >> 9) & 7;
-
-    const src = this.decodeEA(srcMode, srcReg, size);
-    const s = src.read();
-    const d = this.D[dstReg] & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
-
-    const r = (d + s) & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
-    this.D[dstReg] = (this.D[dstReg] & ~((1<<(size*8))-1)) | r;
-
-    this.updateNZ(r, size);
-}
-opSUB(op) {
-    const size = [1,2,4][(op >> 6) & 3];
-    const srcMode = (op >> 3) & 7;
-    const srcReg  = op & 7;
-    const dstReg  = (op >> 9) & 7;
-
-    const src = this.decodeEA(srcMode, srcReg, size);
-    const s = src.read();
-    const d = this.D[dstReg] & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
-
-    const r = (d - s) & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
-    this.D[dstReg] = (this.D[dstReg] & ~((1<<(size*8))-1)) | r;
-
-    this.updateNZ(r, size);
-}
-opCMP(op) {
-    const size = [1,2,4][(op >> 6) & 3];
-    const srcMode = (op >> 3) & 7;
-    const srcReg  = op & 7;
-    const dstReg  = (op >> 9) & 7;
-
-    const src = this.decodeEA(srcMode, srcReg, size);
-    const s = src.read();
-    const d = this.D[dstReg] & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
-
-    const r = (d - s) & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
-
-    this.updateNZ(r, size);
-}
-opCLR(op) {
-    const size = [1,2,4][(op >> 6) & 3];
-    const mode = (op >> 3) & 7;
-    const reg  = op & 7;
-
-    const ea = this.decodeEA(mode, reg, size);
-    ea.write(0);
-
-    this.updateNZ(0, size);
-}
-opTST(op) {
-    const size = [1,2,4][(op >> 6) & 3];
-    const mode = (op >> 3) & 7;
-    const reg  = op & 7;
-
-    const ea = this.decodeEA(mode, reg, size);
-    const val = ea.read();
-
-    this.updateNZ(val, size);
-}
-opLEA(op) {
-    const reg = (op >> 9) & 7;
-    const mode = (op >> 3) & 7;
-    const r = op & 7;
-
-    const ea = this.decodeEA(mode, r, 4);
-    const addr = ea.address; // decodeEA に address を持たせる
-
-    this.A[reg] = addr;
-}
-opPEA(op) {
-    const mode = (op >> 3) & 7;
-    const reg  = op & 7;
-
-    const ea = this.decodeEA(mode, reg, 4);
-    const addr = ea.address;
-
-    this.A[7] -= 4;
-    this.bus.write32(this.A[7], addr);
-}
-opLSL(op) {
-    const size = [1,2,4][(op >> 6) & 3];
-    const reg = op & 7;
-
-    let val = this.D[reg] & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
-    val = (val << 1) & ((size===1)?0xFF:(size===2)?0xFFFF:0xFFFFFFFF);
-
-    this.D[reg] = (this.D[reg] & ~((1<<(size*8))-1)) | val;
-
-    this.updateNZ(val, size);
-}
-
-opBcc(op) {
-    let cc = (op >> 8) & 0x0F;
-    let disp8 = op & 0xFF;
-
-    // 8bit displacement は signed
-    if (disp8 === 0) {
-        // 16bit displacement
-        disp8 = this.bus.read16(this.PC);
-        this.PC += 2;
-        if (disp8 & 0x8000) disp8 |= 0xFFFF0000;
-    } else {
-        if (disp8 & 0x80) disp8 |= 0xFFFFFF00;
-    }
-
-    // BSR（cc=1）は特別扱い
-    if (cc === 1) {
-        // push return address
-        this.A[7] -= 4;
-        this.bus.write32(this.A[7], this.PC);
-        this.PC += disp8;
-        return;
-    }
-
-    // BRA / Bcc
-    if (this.checkCondition(cc)) {
-        this.PC += disp8;
-    }
-}
-opJSR(op) {
-    let mode = (op >> 3) & 7;
-    let reg  = op & 7;
-
-    let ea = this.decodeEA(mode, reg, 4);
-    let addr = ea.read();
-
-    // push return address
-    this.A[7] -= 4;
-    this.bus.write32(this.A[7], this.PC);
-
-    this.PC = addr;
-}
-opRTS(op) {
-    let ret = this.bus.read32(this.A[7]);
-    this.A[7] += 4;
-    this.PC = ret;
-}
-
-    buildOpcodeTable() {
-      for (let i = 0; i < 65536; i++) {
-        this.opcodeTable[i] = this.opIllegal.bind(this);
-    }
-
-    // --- BRA / BSR / Bcc ---
-    for (let cc = 0; cc < 16; cc++) {
-        for (let disp = 0; disp < 256; disp++) {
-            let op = 0x6000 | (cc << 8) | disp;
-            this.opcodeTable[op] = this.opBcc.bind(this);
+    <input type="file" id="romInput" accept=".bin,.md,.gen" />
+    <canvas id="screen" width="320" height="224"></canvas>
+    <script>
+      class CPU68K {
+        constructor(bus) {
+          this.bus = bus;
+          this.D = new Uint32Array(8); // データレジスタ
+          this.A = new Uint32Array(8); // アドレスレジスタ
+          this.PC = 0;
+          this.SR = 0x2700; // Supervisor + IRQ mask
+          this.opcodeTable = new Array(65536);
+          this.buildOpcodeTable();
         }
-    }
 
-    // --- JSR ---
-    for (let mode = 0; mode < 8; mode++) {
-        for (let reg = 0; reg < 8; reg++) {
-            let op = 0x4E80 | (mode << 3) | reg;
-            this.opcodeTable[op] = this.opJSR.bind(this);
+        reset() {
+          let initialSP = 0; //this.bus.read32(0);
+          let initialPC = 0x000004; // this.bus.read32(4);
+          this.A[7] = initialSP;
+          this.PC = initialPC;
+          // リセットベクタを読む（0x000000 に初期SP、0x000004 に初期PC）
+          //this.pc = (this.bus.read16(4) << 16) | this.bus.read16(6);
         }
-    }
 
-    // --- RTS ---
-    this.opcodeTable[0x4E75] = this.opRTS.bind(this);
-      
+        step() {
+          // まだ命令実装なし
+          let opcode = this.bus.read16(this.PC);
+          this.PC += 2;
+          this.opcodeTable[opcode](opcode);
+          //let opcode = this.bus.read16(this.pc);
+          //console.log("68K opcode:", opcode.toString(16));
+          //this.pc += 2;
+        }
+        checkCondition(cc) {
+          let N = (this.SR >> 3) & 1;
+          let Z = (this.SR >> 2) & 1;
+          let V = (this.SR >> 1) & 1;
+          let C = (this.SR >> 0) & 1;
 
-        // MOVE.W (example)
-        for (let mode = 0; mode < 8; mode++) {
+          switch (cc) {
+            case 0:
+              return true; // BRA (always)
+            case 1:
+              return false; // BSR (handled separately)
+            case 2:
+              return !C; // BHI
+            case 3:
+              return C; // BLS
+            case 4:
+              return !C && !Z; // BCC
+            case 5:
+              return C || Z; // BCS
+            case 6:
+              return !Z; // BNE
+            case 7:
+              return Z; // BEQ
+            case 8:
+              return !V; // BVC
+            case 9:
+              return V; // BVS
+            case 10:
+              return !N; // BPL
+            case 11:
+              return N; // BMI
+            case 12:
+              return N === V; // BGE
+            case 13:
+              return N !== V; // BLT
+            case 14:
+              return !Z && N === V; // BGT
+            case 15:
+              return Z || N !== V; // BLE
+          }
+          return false;
+        }
+        opMOVE(op) {
+          const sizeBits = (op >> 12) & 0x03;
+          let size = 0;
+          if (sizeBits === 1)
+            size = 1; // MOVE.B
+          else if (sizeBits === 3)
+            size = 2; // MOVE.W
+          else if (sizeBits === 2) size = 4; // MOVE.L
+
+          const srcMode = (op >> 3) & 7;
+          const srcReg = op & 7;
+          const dstMode = (op >> 6) & 7;
+          const dstReg = (op >> 9) & 7;
+
+          const src = this.decodeEA(srcMode, srcReg, size);
+          const dst = this.decodeEA(dstMode, dstReg, size);
+
+          const val = src.read();
+          dst.write(val);
+
+          this.updateNZ(val, size);
+        }
+        opMOVEQ(op) {
+          const reg = (op >> 9) & 7;
+          let imm = op & 0xff;
+          if (imm & 0x80) imm |= 0xffffff00; // sign extend
+
+          this.D[reg] = imm;
+
+          this.updateNZ(imm, 4);
+        }
+        opADD(op) {
+          const size = [1, 2, 4][(op >> 6) & 3];
+          const srcMode = (op >> 3) & 7;
+          const srcReg = op & 7;
+          const dstReg = (op >> 9) & 7;
+
+          const src = this.decodeEA(srcMode, srcReg, size);
+          const s = src.read();
+          const d =
+            this.D[dstReg] &
+            (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
+
+          const r =
+            (d + s) & (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
+          this.D[dstReg] = (this.D[dstReg] & ~((1 << (size * 8)) - 1)) | r;
+
+          this.updateNZ(r, size);
+        }
+        opSUB(op) {
+          const size = [1, 2, 4][(op >> 6) & 3];
+          const srcMode = (op >> 3) & 7;
+          const srcReg = op & 7;
+          const dstReg = (op >> 9) & 7;
+
+          const src = this.decodeEA(srcMode, srcReg, size);
+          const s = src.read();
+          const d =
+            this.D[dstReg] &
+            (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
+
+          const r =
+            (d - s) & (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
+          this.D[dstReg] = (this.D[dstReg] & ~((1 << (size * 8)) - 1)) | r;
+
+          this.updateNZ(r, size);
+        }
+        opCMP(op) {
+          const size = [1, 2, 4][(op >> 6) & 3];
+          const srcMode = (op >> 3) & 7;
+          const srcReg = op & 7;
+          const dstReg = (op >> 9) & 7;
+
+          const src = this.decodeEA(srcMode, srcReg, size);
+          const s = src.read();
+          const d =
+            this.D[dstReg] &
+            (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
+
+          const r =
+            (d - s) & (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
+
+          this.updateNZ(r, size);
+        }
+        opCLR(op) {
+          const size = [1, 2, 4][(op >> 6) & 3];
+          const mode = (op >> 3) & 7;
+          const reg = op & 7;
+
+          const ea = this.decodeEA(mode, reg, size);
+          ea.write(0);
+
+          this.updateNZ(0, size);
+        }
+        opTST(op) {
+          const size = [1, 2, 4][(op >> 6) & 3];
+          const mode = (op >> 3) & 7;
+          const reg = op & 7;
+
+          const ea = this.decodeEA(mode, reg, size);
+          const val = ea.read();
+
+          this.updateNZ(val, size);
+        }
+        opLEA(op) {
+          const reg = (op >> 9) & 7;
+          const mode = (op >> 3) & 7;
+          const r = op & 7;
+
+          const ea = this.decodeEA(mode, r, 4);
+          const addr = ea.address; // decodeEA に address を持たせる
+
+          this.A[reg] = addr;
+        }
+        opPEA(op) {
+          const mode = (op >> 3) & 7;
+          const reg = op & 7;
+
+          const ea = this.decodeEA(mode, reg, 4);
+          const addr = ea.address;
+
+          this.A[7] -= 4;
+          this.bus.write32(this.A[7], addr);
+        }
+        opLSL(op) {
+          const size = [1, 2, 4][(op >> 6) & 3];
+          const reg = op & 7;
+
+          let val =
+            this.D[reg] &
+            (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
+          val =
+            (val << 1) & (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
+
+          this.D[reg] = (this.D[reg] & ~((1 << (size * 8)) - 1)) | val;
+
+          this.updateNZ(val, size);
+        }
+
+        opBcc(op) {
+          let cc = (op >> 8) & 0x0f;
+          let disp8 = op & 0xff;
+
+          // 8bit displacement は signed
+          if (disp8 === 0) {
+            // 16bit displacement
+            disp8 = this.bus.read16(this.PC);
+            this.PC += 2;
+            if (disp8 & 0x8000) disp8 |= 0xffff0000;
+          } else {
+            if (disp8 & 0x80) disp8 |= 0xffffff00;
+          }
+
+          // BSR（cc=1）は特別扱い
+          if (cc === 1) {
+            // push return address
+            this.A[7] -= 4;
+            this.bus.write32(this.A[7], this.PC);
+            this.PC += disp8;
+            return;
+          }
+
+          // BRA / Bcc
+          if (this.checkCondition(cc)) {
+            this.PC += disp8;
+          }
+        }
+        opJSR(op) {
+          let mode = (op >> 3) & 7;
+          let reg = op & 7;
+
+          let ea = this.decodeEA(mode, reg, 4);
+          let addr = ea.read();
+
+          // push return address
+          this.A[7] -= 4;
+          this.bus.write32(this.A[7], this.PC);
+
+          this.PC = addr;
+        }
+        opRTS(op) {
+          let ret = this.bus.read32(this.A[7]);
+          this.A[7] += 4;
+          this.PC = ret;
+        }
+
+        buildOpcodeTable() {
+          for (let i = 0; i < 65536; i++) {
+            this.opcodeTable[i] = this.opIllegal.bind(this);
+          }
+
+          // --- BRA / BSR / Bcc ---
+          for (let cc = 0; cc < 16; cc++) {
+            for (let disp = 0; disp < 256; disp++) {
+              let op = 0x6000 | (cc << 8) | disp;
+              this.opcodeTable[op] = this.opBcc.bind(this);
+            }
+          }
+
+          // --- JSR ---
+          for (let mode = 0; mode < 8; mode++) {
             for (let reg = 0; reg < 8; reg++) {
-                let op = 0x3000 | (reg << 9) | (mode << 3);
-                this.opcodeTable[op] = this.opMOVE_W.bind(this);
+              let op = 0x4e80 | (mode << 3) | reg;
+              this.opcodeTable[op] = this.opJSR.bind(this);
             }
-        }
+          }
 
-        // ADD.W Dn, Dn
-        for (let dx = 0; dx < 8; dx++) {
+          // --- RTS ---
+          this.opcodeTable[0x4e75] = this.opRTS.bind(this);
+
+          // MOVE.W (example)
+          for (let mode = 0; mode < 8; mode++) {
+            for (let reg = 0; reg < 8; reg++) {
+              let op = 0x3000 | (reg << 9) | (mode << 3);
+              this.opcodeTable[op] = this.opMOVE_W.bind(this);
+            }
+          }
+
+          // ADD.W Dn, Dn
+          for (let dx = 0; dx < 8; dx++) {
             for (let dy = 0; dy < 8; dy++) {
-                let op = 0xD000 | (dy << 9) | dx;
-                this.opcodeTable[op] = this.opADD_W.bind(this);
+              let op = 0xd000 | (dy << 9) | dx;
+              this.opcodeTable[op] = this.opADD_W.bind(this);
             }
+          }
         }
-    }
 
-    // ============================
-    // Addressing Mode Decoder
-    // ============================
-    decodeEA(mode, reg, size) {
-        switch (mode) {
+        // ============================
+        // Addressing Mode Decoder
+        // ============================
+        decodeEA(mode, reg, size) {
+          switch (mode) {
             case 0: // Dn
-                return {
-                    read: () => this.D[reg] & ((size === 2) ? 0xFFFF : 0xFFFFFFFF),
-                    write: (v) => { this.D[reg] = v; }
-                };
+              return {
+                read: () => this.D[reg] & (size === 2 ? 0xffff : 0xffffffff),
+                write: (v) => {
+                  this.D[reg] = v;
+                },
+              };
 
             case 1: // An
-                return {
-                    read: () => this.A[reg],
-                    write: (v) => { this.A[reg] = v; }
-                };
+              return {
+                read: () => this.A[reg],
+                write: (v) => {
+                  this.A[reg] = v;
+                },
+              };
 
             case 2: // (An)
-                return {
-                    read: () => this.bus.read(size, this.A[reg]),
-                    write: (v) => this.bus.write(size, this.A[reg], v)
-                };
+              return {
+                read: () => this.bus.read(size, this.A[reg]),
+                write: (v) => this.bus.write(size, this.A[reg], v),
+              };
 
             default:
-               
-                return {
-                    read: () => 0,
-                    write: () => {}
-                };
+              return {
+                read: () => 0,
+                write: () => {},
+              };
+          }
         }
-    }
 
-    // ============================
-    // MOVE.W
-    // ============================
-    opMOVE_W(op) {
-        let srcMode = (op >> 3) & 7;
-        let srcReg  = op & 7;
-        let dstReg  = (op >> 9) & 7;
+        // ============================
+        // MOVE.W
+        // ============================
+        opMOVE_W(op) {
+          let srcMode = (op >> 3) & 7;
+          let srcReg = op & 7;
+          let dstReg = (op >> 9) & 7;
 
-        let src = this.decodeEA(srcMode, srcReg, 2);
-        let val = src.read();
+          let src = this.decodeEA(srcMode, srcReg, 2);
+          let val = src.read();
 
-        this.D[dstReg] = (this.D[dstReg] & 0xFFFF0000) | (val & 0xFFFF);
+          this.D[dstReg] = (this.D[dstReg] & 0xffff0000) | (val & 0xffff);
 
-        this.updateNZ(val, 2);
-    }
+          this.updateNZ(val, 2);
+        }
 
-    // ============================
-    // ADD.W Dn, Dn
-    // ============================
-    opADD_W(op) {
-        let src = op & 7;
-        let dst = (op >> 9) & 7;
+        // ============================
+        // ADD.W Dn, Dn
+        // ============================
+        opADD_W(op) {
+          let src = op & 7;
+          let dst = (op >> 9) & 7;
 
-        let s = this.D[src] & 0xFFFF;
-        let d = this.D[dst] & 0xFFFF;
+          let s = this.D[src] & 0xffff;
+          let d = this.D[dst] & 0xffff;
 
-        let r = (d + s) & 0xFFFF;
-        this.D[dst] = (this.D[dst] & 0xFFFF0000) | r;
+          let r = (d + s) & 0xffff;
+          this.D[dst] = (this.D[dst] & 0xffff0000) | r;
 
-        this.updateNZ(r, 2);
-        // 本来は X, C, V も更新
-    }
+          this.updateNZ(r, 2);
+          // 本来は X, C, V も更新
+        }
 
-    // ============================
-    // Illegal Instruction
-    // ============================
-    opIllegal(op) {
-       
-    }
+        // ============================
+        // Illegal Instruction
+        // ============================
+        opIllegal(op) {}
 
-    // ============================
-    // CCR Update
-    // ============================
-    updateNZ(val, size) {
-        let mask = (size === 2) ? 0x8000 : 0x80000000;
-        let zero = (val === 0);
+        // ============================
+        // CCR Update
+        // ============================
+        updateNZ(val, size) {
+          let mask = size === 2 ? 0x8000 : 0x80000000;
+          let zero = val === 0;
 
-        // Clear N/Z
-        this.SR &= ~0x04; // Z
-        this.SR &= ~0x08; // N
+          // Clear N/Z
+          this.SR &= ~0x04; // Z
+          this.SR &= ~0x08; // N
 
-        if (zero) this.SR |= 0x04;
-        if (val & mask) this.SR |= 0x08;
-    }
-}
-class CPUZ80 {
-    constructor(bus) {
-        this.bus = bus;
-        this.pc = 0;
-    }
+          if (zero) this.SR |= 0x04;
+          if (val & mask) this.SR |= 0x08;
+        }
+      }
+      class CPUZ80 {
+        constructor(bus) {
+          this.bus = bus;
+          this.pc = 0;
+        }
 
-    reset() {
-        this.pc = 0x0000;
-    }
+        reset() {
+          this.pc = 0x0000;
+        }
 
-    step() {
-        let opcode = this.bus.read8(this.pc);
-       
-        this.pc += 1;
-    }
-}
-class VDP {
-    constructor(ctx, bus) {
-        this.ctx = ctx;
-        this.bus = bus;
+        step() {
+          let opcode = this.bus.read8(this.pc);
 
-        this.vram = new Uint8Array(0x10000);  // 64KB
-        this.cram = new Uint8Array(0x80);     // 128B
-        this.vsram = new Uint8Array(0x50);    // 80B
-        this.reg = new Uint8Array(0x20);      // 24 registers
+          this.pc += 1;
+        }
+      }
+      class VDP {
+        constructor(ctx, bus) {
+          this.ctx = ctx;
+          this.bus = bus;
 
-        this.controlWord = 0;
-        this.address = 0;
-        this.code = 0;
+          this.vram = new Uint8Array(0x10000); // 64KB
+          this.cram = new Uint8Array(0x80); // 128B
+          this.vsram = new Uint8Array(0x50); // 80B
+          this.reg = new Uint8Array(0x20); // 24 registers
 
-        this.imageData = ctx.createImageData(320, 224);
-    }
+          this.controlWord = 0;
+          this.address = 0;
+          this.code = 0;
+          this.vdp = null;
+          this.imageData = ctx.createImageData(320, 224);
+        }
+        connectVDP(vdp) {
+          this.vdp = vdp;
+        }
+        reset() {
+          this.controlWord = 0;
+          this.address = 0;
+          this.code = 0;
+        }
 
-    reset() {
-        this.controlWord = 0;
-        this.address = 0;
-        this.code = 0;
-    }
-
-    // ============================
-    // VDP ポート読み書き
-    // ============================
-    readPort(port) {
-        if (port === 4) {
+        // ============================
+        // VDP ポート読み書き
+        // ============================
+        readPort(port) {
+          if (port === 4) {
             return 0x3400; // VDP status (最低限)
+          }
+          return 0;
         }
-        return 0;
-    }
 
-    writePort(port, val) {
-        if (port === 0) {
-            // VRAM write
-            if (this.code === 1) {
-                this.vram[this.address & 0xFFFF] = val;
-                this.address++;
+        writePort(port, val) {
+          val &= 0xff; // データポート
+          if (port === 0) {
+            switch (this.code) {
+              case 1: // VRAM write
+                this.vram[this.address & 0xffff] = val;
+                this.address = (this.address + 1) & 0xffff;
+                break;
+              case 2: // CRAM write
+                this.cram[this.address & 0x7f] = val;
+                this.address = (this.address + 1) & 0xffff;
+                break;
+              case 3: // VSRAM write
+                this.vsram[this.address & 0x7f] = val;
+                this.address = (this.address + 1) & 0xffff;
+                break;
             }
             return;
-        }
-
-        if (port === 4) {
-            // Control port
-            this.controlWord = (this.controlWord << 8) | val;
-
-            if (this.controlWord & 0x8000) {
-                this.code = (this.controlWord >> 14) & 3;
-                this.address = this.controlWord & 0x3FFF;
-                this.controlWord = 0;
+          } // コントロールポート
+          if (port === 4) {
+            this.controlLatch = ((this.controlLatch << 8) | val) & 0xffff;
+            this.controlCount++;
+            if (this.controlCount === 2) {
+              this.controlCount = 0; // レジスタ書き込み？
+              if (this.controlLatch & 0x8000) {
+                const code = (this.controlLatch >> 14) & 3;
+                const addr = this.controlLatch & 0x3fff;
+                if (code === 0) {
+                  // レジスタ書き込み: 1rrrrddd dddddddd
+                  const regNum = (this.controlLatch >> 8) & 0x1f;
+                  const data = this.controlLatch & 0xff;
+                  if (regNum < this.reg.length) this.reg[regNum] = data;
+                } else {
+                  this.code = code;
+                  this.address = addr;
+                }
+              }
             }
-            return;
+          }
         }
-    }
 
-    // ============================
-    // 1フレーム描画（BG A のみ）
-    // ============================
-    renderFrame() {
-        // とりあえず黒画面
-        for (let i = 0; i < this.imageData.data.length; i += 4) {
-            this.imageData.data[i] = 0;
-            this.imageData.data[i+1] = 0;
-            this.imageData.data[i+2] = 0;
-            this.imageData.data[i+3] = 255;
+        // ============================
+        // 1フレーム描画（BG A のみ）
+        // ============================
+        getColor(palIndex, colorIndex) {
+          const idx = (palIndex * 16 + colorIndex) * 2;
+          const lo = this.cram[idx] || 0;
+          const hi = this.cram[idx + 1] || 0;
+          const word = (hi << 8) | lo;
+          const r = (word & 0x00e) >> 1;
+          const g = (word & 0x0e0) >> 5;
+          const b = (word & 0xe00) >> 9; // 0–7 → 0–255
+          return [(r * 255) / 7, (g * 255) / 7, (b * 255) / 7];
         }
-        this.ctx.putImageData(this.imageData, 0, 0);
-    }
-}
+        renderFrame() {
+          const w = 320;
+          const h = 224;
+          const data = this.imageData.data; // Plane A ネームテーブルベース（reg2）
+          const planeABase = (this.reg[2] & 0x38) << 10; // bits 5-3, *0x400
+          for (let y = 0; y < h; y++) {
+            const tileY = (y >> 3) & 0x1f; // 32 tiles
+            const py = y & 7;
+            for (let x = 0; x < w; x++) {
+              const tileX = (x >> 3) & 0x3f; // 64 tiles
+              const px = x & 7;
+              const ntIndex = tileY * 64 + tileX;
+              const ntAddr = planeABase + (ntIndex << 1);
+              const lo = this.vram[ntAddr & 0xffff];
+              const hi = this.vram[(ntAddr + 1) & 0xffff];
+              const entry = (hi << 8) | lo;
+              const tileIndex = entry & 0x7ff;
+              const pal = (entry >> 13) & 3;
+              const hflip = (entry >> 11) & 1;
+              const vflip = (entry >> 12) & 1;
+              let tx = px;
+              let ty = py;
+              if (hflip) tx = 7 - tx;
+              if (vflip) ty = 7 - ty;
+              const tileBase = tileIndex * 32; // 8x8x4bpp = 32 bytes
+              const rowAddr = tileBase + ty * 4;
+              const b0 = this.vram[(rowAddr + 0) & 0xffff];
+              const b1 = this.vram[(rowAddr + 1) & 0xffff];
+              const b2 = this.vram[(rowAddr + 2) & 0xffff];
+              const b3 = this.vram[(rowAddr + 3) & 0xffff];
+              const bit = 7 - tx;
+              const c =
+                (((b0 >> bit) & 1) << 0) |
+                (((b1 >> bit) & 1) << 1) |
+                (((b2 >> bit) & 1) << 2) |
+                (((b3 >> bit) & 1) << 3);
+              const [r, g, b] = c === 0 ? [0, 0, 0] : this.getColor(pal, c);
+              const idx = (y * w + x) * 4;
+              data[idx] = r;
+              data[idx + 1] = g;
+              data[idx + 2] = b;
+              data[idx + 3] = 255;
+            }
+          }
+          this.ctx.putImageData(this.imageData, 0, 0);
+        }
+      }
 
-class Bus {
-    constructor() {
-        this.rom = new Uint8Array(0);
-        this.ram68k = new Uint8Array(0x10000); // FF0000-FFFFFF (64KB)
-        this.z80ram = new Uint8Array(0x2000);  // A00000-A01FFF (8KB)
+      class Bus {
+        constructor() {
+          this.rom = new Uint8Array(0);
+          this.ram68k = new Uint8Array(0x10000); // FF0000-FFFFFF (64KB)
+          this.z80ram = new Uint8Array(0x2000); // A00000-A01FFF (8KB)
 
-        this.vdp = null;   // 後で VDP インスタンスを渡す
-        this.io = new Uint8Array(0x20); // A10000-A1001F
-    }
+          this.vdp = null; // 後で VDP インスタンスを渡す
+          this.io = new Uint8Array(0x20); // A10000-A1001F
+        }
 
-    connectVDP(vdp) {
-        this.vdp = vdp;
-    }
+        connectVDP(vdp) {
+          this.vdp = vdp;
+        }
 
-    loadROM(data) {
-        this.rom = data;
-    }
+        loadROM(data) {
+          this.rom = data;
+        }
 
-    // ============================
-    // 8bit Read
-    // ============================
-    read8(addr) {
-        addr &= 0xFFFFFF;
+        // ============================
+        // 8bit Read
+        // ============================
+        read8(addr) {
+          addr &= 0xffffff;
 
-        // ROM 0x000000 - 0x3FFFFF
-        if (addr < this.rom.length) {
+          // ROM 0x000000 - 0x3FFFFF
+          if (addr < this.rom.length) {
             return this.rom[addr];
+          }
+
+          // 68K RAM 0xFF0000 - 0xFFFFFF
+          if (addr >= 0xff0000) {
+            return this.ram68k[addr & 0xffff];
+          }
+
+          // Z80 RAM 0xA00000 - 0xA01FFF
+          if (addr >= 0xa00000 && addr <= 0xa01fff) {
+            return this.z80ram[addr & 0x1fff];
+          }
+
+          // IO 0xA10000 - 0xA1001F
+          if (addr >= 0xa10000 && addr <= 0xa1001f) {
+            return this.io[addr & 0x1f];
+          }
+
+          // VDP 0xC00000 - 0xC0001F
+          if (addr >= 0xc00000 && addr <= 0xc0001f) {
+            return this.vdp ? this.vdp.readPort(addr & 0x1f) : 0;
+          }
+
+          return 0;
         }
 
-        // 68K RAM 0xFF0000 - 0xFFFFFF
-        if (addr >= 0xFF0000) {
-            return this.ram68k[addr & 0xFFFF];
+        // ============================
+        // 16bit Read
+        // ============================
+        read16(addr) {
+          return (this.read8(addr) << 8) | this.read8(addr + 1);
         }
 
-        // Z80 RAM 0xA00000 - 0xA01FFF
-        if (addr >= 0xA00000 && addr <= 0xA01FFF) {
-            return this.z80ram[addr & 0x1FFF];
+        // ============================
+        // 32bit Read
+        // ============================
+        read32(addr) {
+          return (this.read16(addr) << 16) | this.read16(addr + 2);
         }
 
-        // IO 0xA10000 - 0xA1001F
-        if (addr >= 0xA10000 && addr <= 0xA1001F) {
-            return this.io[addr & 0x1F];
-        }
+        // ============================
+        // 8bit Write
+        // ============================
+        write8(addr, val) {
+          addr &= 0xffffff;
+          val &= 0xff;
 
-        // VDP 0xC00000 - 0xC0001F
-        if (addr >= 0xC00000 && addr <= 0xC0001F) {
-            return this.vdp ? this.vdp.readPort(addr & 0x1F) : 0;
-        }
-
-        return 0;
-    }
-
-    // ============================
-    // 16bit Read
-    // ============================
-    read16(addr) {
-        return (this.read8(addr) << 8) | this.read8(addr + 1);
-    }
-
-    // ============================
-    // 32bit Read
-    // ============================
-    read32(addr) {
-        return (this.read16(addr) << 16) | this.read16(addr + 2);
-    }
-
-    // ============================
-    // 8bit Write
-    // ============================
-    write8(addr, val) {
-        addr &= 0xFFFFFF;
-        val &= 0xFF;
-
-        // 68K RAM
-        if (addr >= 0xFF0000) {
-            this.ram68k[addr & 0xFFFF] = val;
+          // 68K RAM
+          if (addr >= 0xff0000) {
+            this.ram68k[addr & 0xffff] = val;
             return;
-        }
+          }
 
-        // Z80 RAM
-        if (addr >= 0xA00000 && addr <= 0xA01FFF) {
-            this.z80ram[addr & 0x1FFF] = val;
+          // Z80 RAM
+          if (addr >= 0xa00000 && addr <= 0xa01fff) {
+            this.z80ram[addr & 0x1fff] = val;
             return;
-        }
+          }
 
-        // IO
-        if (addr >= 0xA10000 && addr <= 0xA1001F) {
-            this.io[addr & 0x1F] = val;
+          // IO
+          if (addr >= 0xa10000 && addr <= 0xa1001f) {
+            this.io[addr & 0x1f] = val;
             return;
-        }
+          }
 
-        // VDP
-        if (addr >= 0xC00000 && addr <= 0xC0001F) {
-            if (this.vdp) this.vdp.writePort(addr & 0x1F, val);
+          // VDP
+          if (addr >= 0xc00000 && addr <= 0xc0001f) {
+            if (this.vdp) this.vdp.writePort(addr & 0x1f, val);
             return;
+          }
         }
-    }
 
-    // ============================
-    // 16bit Write
-    // ============================
-    write16(addr, val) {
-        this.write8(addr, val >> 8);
-        this.write8(addr + 1, val & 0xFF);
-    }
+        // ============================
+        // 16bit Write
+        // ============================
+        write16(addr, val) {
+          this.write8(addr, val >> 8);
+          this.write8(addr + 1, val & 0xff);
+        }
 
-    // ============================
-    // 32bit Write
-    // ============================
-    write32(addr, val) {
-        this.write16(addr, val >> 16);
-        this.write16(addr + 2, val & 0xFFFF);
-    }
-}
+        // ============================
+        // 32bit Write
+        // ============================
+        write32(addr, val) {
+          this.write16(addr, val >> 16);
+          this.write16(addr + 2, val & 0xffff);
+        }
+      }
 
+      let canvas = document.getElementById("screen");
+      let ctx = canvas.getContext("2d");
 
-let canvas = document.getElementById("screen");
-let ctx = canvas.getContext("2d");
+      let bus = new Bus();
+      let cpu68k = new CPU68K(bus);
+      let cpuZ80 = new CPUZ80(bus);
+      let vdp = new VDP(ctx, bus);
 
-let bus = new Bus();
-let cpu68k = new CPU68K(bus);
-let cpuZ80 = new CPUZ80(bus);
-let vdp = new VDP(ctx, bus);
+      document
+        .getElementById("romInput")
+        .addEventListener("change", async (e) => {
+          let file = e.target.files[0];
+          let buffer = await file.arrayBuffer();
+          bus.loadROM(new Uint8Array(buffer));
+          reset();
+        });
 
-document.getElementById("romInput").addEventListener("change", async (e) => {
-    let file = e.target.files[0];
-    let buffer = await file.arrayBuffer();
-    bus.loadROM(new Uint8Array(buffer));
-    reset();
-});
+      function reset() {
+        cpu68k.reset();
+        cpuZ80.reset();
+        vdp.reset();
+        frame();
+      }
 
-function reset() {
-    cpu68k.reset();
-    cpuZ80.reset();
-    vdp.reset();
-frame();
-}
-
-function frame() {
-    // MegaDrive は 1 フレーム ≒ 60Hz
-    // 1フレーム中に 68000 と Z80 を一定サイクル回す
-    for (let i = 0; i < 200000; i++) cpu68k.step();
-    for (let i = 0; i < 50000; i++) cpuZ80.step();
-document.getElementById("pc").textContent=cpu68k.PC.toString(16);
-    vdp.renderFrame();
-    requestAnimationFrame(frame);
-}
-
-
-
-</script>
-
-</body>
+      function frame() {
+        // MegaDrive は 1 フレーム ≒ 60Hz
+        // 1フレーム中に 68000 と Z80 を一定サイクル回す
+        for (let i = 0; i < 200000; i++) cpu68k.step();
+        for (let i = 0; i < 50000; i++) cpuZ80.step();
+        document.getElementById("pc").textContent = cpu68k.PC.toString(16);
+        vdp.renderFrame();
+        requestAnimationFrame(frame);
+      }
+    </script>
+  </body>
 </html>
