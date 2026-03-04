@@ -821,9 +821,22 @@ _rl(a) {
       _rb(a) { return this.bus.read8(a & 0xffffff); }
       //_rw(a) { return this.bus.read16(a & 0xfffffe); }
      // _rl(a) { return ((this.bus.read16(a & 0xfffffe) << 16) | this.bus.read16((a+2) & 0xfffffe)) | 0; }
-      _wb(a,v) { this.bus.write8(a & 0xffffff, v & 0xff); }
-      _ww(a,v) { this.bus.write16(a & 0xfffffe, v & 0xffff); }
-      _wl(a,v) { this.bus.write16(a & 0xfffffe, (v>>>16)&0xffff); this.bus.write16((a+2)&0xfffffe, v&0xffff); }
+      //_wb(a,v) { this.bus.write8(a & 0xffffff, v & 0xff); }
+      //_ww(a,v) { this.bus.write16(a & 0xfffffe, v & 0xffff); }
+     // _wl(a,v) { this.bus.write16(a & 0xfffffe, (v>>>16)&0xffff); this.bus.write16((a+2)&0xfffffe, v&0xffff); }
+_wb(a, v) {
+  this.bus.write8(a & 0xffffff, v & 0xff);
+}
+
+_ww(a, v) {
+  this.bus.write16(a & 0xffffff, v & 0xffff);
+}
+
+_wl(a, v) {
+  const addr = a & 0xffffff;
+  this.bus.write16(addr,     (v >>> 16) & 0xffff);
+  this.bus.write16((addr+2) & 0xffffff, v & 0xffff);
+}
 
       _fetch() { const v = this._rw(this.pc); this.pc = (this.pc + 2) & 0xffffff; return v; }
       //_fetchL() { const v = this._rl(this.pc); this.pc = (this.pc + 4) & 0xffffff; return v; }
@@ -992,24 +1005,35 @@ _fetchL() {
         }
       }
 
-      _processIRQ() {
-        if (!this.pendingIRQ) return;
-        const level = this.pendingIRQ;
-        if (level <= this.ipl) { this.pendingIRQ = 0; return; }
-        this.pendingIRQ = 0;
-        this.halted = false;
-        // Push PC and SR to supervisor stack
-        const oldSR = this.sr;
-        this.sr = (this.sr & ~0x0700) | (level << 8) | 0x2000; // supervisor mode, set IPL
-        this.a[7] = (this.a[7] - 4) | 0;
-        this._wl(this.a[7] & 0xffffff, this.pc);
-        this.a[7] = (this.a[7] - 2) | 0;
-        this._ww(this.a[7] & 0xffffff, oldSR);
-        // Vector: level * 4 + 0x60 (auto-vector)
-        const vecAddr = (level + 24) * 4;
-        this.pc = this._rl(vecAddr) & 0xffffff;
-        this.cyc += 44;
-      }
+      
+_processIRQ() {
+  if (!this.pendingIRQ) return;
+  const level = this.pendingIRQ;
+  if (level <= this.ipl) { this.pendingIRQ = 0; return; }
+  this.pendingIRQ = 0;
+  this.halted = false;
+
+  const oldSR = this.sr;
+  this.sr = (this.sr & ~0x0700) | (level << 8) | 0x2000;
+
+  // ベクタオフセット（format 0 の3ワード目）
+  const vecNum  = level + 24;
+  const vecAddr = vecNum * 4;
+
+  this.a[7] = (this.a[7] - 2) & 0xffffff;
+  this._ww(this.a[7], vecAddr);   // ここは vecNum でも可
+
+  // PC
+  this.a[7] = (this.a[7] - 4) & 0xffffff;
+  this._wl(this.a[7], this.pc);
+
+  // SR
+  this.a[7] = (this.a[7] - 2) & 0xffffff;
+  this._ww(this.a[7], oldSR);
+
+  this.pc = this._rl(vecAddr) & 0xffffff;
+  this.cyc += 44;
+}
 
       // ── Single step ──
       step() {
@@ -1053,17 +1077,39 @@ console.log("OP:"+op.toString(16))
         }
       }
 
-      _exception(vec, addr) {
-        this.halted = false;
-        const oldSR = this.sr;
-        this.sr |= 0x2000;
-        this.a[7] = (this.a[7] - 4) | 0;
-        this._wl(this.a[7] & 0xffffff, addr);
-        this.a[7] = (this.a[7] - 2) | 0;
-        this._ww(this.a[7] & 0xffffff, oldSR);
-        this.pc = this._rl(vec * 4) & 0xffffff;
-        this.cyc += 34;
-      }
+     // _exception(vec, addr) {
+     //   this.halted = false;
+    //    const oldSR = this.sr;
+    //    this.sr |= 0x2000;
+    //    this.a[7] = (this.a[7] - 4) | 0;
+    //    this._wl(this.a[7] & 0xffffff, addr);
+    //    this.a[7] = (this.a[7] - 2) | 0;
+    //    this._ww(this.a[7] & 0xffffff, oldSR);
+    //    this.pc = this._rl(vec * 4) & 0xffffff;
+     //   this.cyc += 34;
+    //  }
+_exception(vec, addr) {
+  this.halted = false;
+  const oldSR = this.sr;
+
+  // Sビットだけ立てる（IPLは vec による）
+  this.sr |= 0x2000;
+
+  // ベクタオフセット（下に来るやつ）
+  this.a[7] = (this.a[7] - 2) & 0xffffff;
+  this._ww(this.a[7], vec * 4);   // or vec 番号でもよい（ROM側は中身を見てないことが多い）
+
+  // PC
+  this.a[7] = (this.a[7] - 4) & 0xffffff;
+  this._wl(this.a[7], addr);
+
+  // SR
+  this.a[7] = (this.a[7] - 2) & 0xffffff;
+  this._ww(this.a[7], oldSR);
+
+  this.pc = this._rl(vec * 4) & 0xffffff;
+  this.cyc += 34;
+}
 
       // ── MOVE instructions (groups 1,2,3) ──
       _moveSz(op, size) {
@@ -1197,13 +1243,22 @@ else if (optype === 5) res = (dst ^ immv) >>> 0;   // EORI
           this.cyc += 16; return;
         }
         // RTR
-        if (op === 0x4e77) {
-          this.sr = (this.sr & ~0x1f) | (this._rw(this.a[7] & 0xffffff) & 0x1f);
-          this.a[7] = (this.a[7] + 2) | 0;
-          this.pc = this._rl(this.a[7] & 0xffffff) & 0xffffff;
-          this.a[7] = (this.a[7] + 4) | 0;
-          this.cyc += 20; return;
-        }
+       if (op === 0x4e77) { // RTR
+  const sp  = this.a[7];
+
+  const ccr = this._rw(sp) & 0xff;          // CCR (8bit)
+  this.a[7] = (sp + 2) & 0xffffff;
+
+  this.sr = (this.sr & 0xff00) | ccr;       // SR 下位8bitだけ更新
+
+  const newPC = this._rl(this.a[7]);        // PC
+  this.a[7] = (this.a[7] + 4) & 0xffffff;
+
+  this.pc = newPC & 0xffffff;
+  this.cyc += 20;
+  return;
+}
+
         if (op === 0x4eb9) { // JSR absolute long
   const target = this._fetchL();
 
