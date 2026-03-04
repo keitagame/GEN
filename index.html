@@ -1258,7 +1258,7 @@ else if (optype === 5) res = (dst ^ immv) >>> 0;   // EORI
   this.cyc += 20;
   return;
 }
-
+if (op === 0x40e7) { this.a[7] = (this.a[7] - 2) & 0xffffff; this._ww(this.a[7], this.sr & 0xffff); this.cyc += 12;return; }
         if (op === 0x4eb9) { // JSR absolute long
   const target = this._fetchL();
 
