@@ -1,850 +1,1852 @@
 <!doctype html>
 <html lang="ja">
   <head>
-    <meta charset="UTF-8" />
-    <title>MegaDrive Emulator Skeleton</title>
+    <meta charset="utf-8" />
+    <title>MD-emu</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <style>
+      @font-face {
+  font-family: "Renner";
+  src: url("./Renner.ttf") format("truetype");
+  font-display: swap;
+ 
+}
+      :root { color-scheme: light dark; }
       body {
-        background: #000000;
-        color: #eee;
-        font-family: monospace;
+        background: rgb(0,0,0);
+        font-family: "Renner";
+        margin: 0; padding: 0;
       }
-      .s{
-        display:flex;
-        align-items:center;
-      justify-content:center;
-        text-align:center;
+      h1 { font-weight: 300; font-size: 25px; }
+      header {
+        display: flex; gap: 12px; align-items: center; margin-bottom: 12px;
       }
       canvas {
-        width:50%;
-        border: 1px solid #555;
+        height: 100%;
+        aspect-ratio: 320 / 224;
         image-rendering: pixelated;
+        border: 1px solid #000000;
+        background: #000;
+      }
+      .row {
+        padding-top: 0px; height: 83vh;
+        justify-content: center; display: flex;
+        gap: 12px; align-items: center;
+      }
+      .mono { font-size: 20px; }
+      small { opacity: 0.7; }
+      button {
+        font-family: sans-serif; padding: 10px;
+        background: rgb(0,0,0); color: rgb(255,255,255);
+        border: 1px solid rgb(255,255,255); cursor: pointer;
+      }
+      .file-input { display: none; }
+      .file-label {
+        display: inline-block; padding: 10px 16px;
+        background: #000000; color: white;
+        border: 1px solid white; border-radius: 0px;
+        cursor: pointer; font-size: 14px; transition: background 0.2s;
       }
     </style>
   </head>
   <body>
-   
+    <header>
+      <h1>Mega Drive</h1>
+      <label class="file-label">
+        Select
+        <input id="rom" type="file" class="file-input" />
+      </label>
+      <span id="file-name"></span>
+      <button id="fullscreenBtn">Fullscreen</button>
+      <button id="start">Start</button>
+      <div class="mono" id="status">No ROM</div>
+      <div>
+        <span class="mono">CPU PC:</span>
+        <span id="pc" class="mono">0x000000</span>
+      </div>
+    </header>
+    <div class="row">
+      <canvas id="screen" width="320" height="224"></canvas>
+      <div style="display:none">
+        <div><b>FPS:</b> <span id="fps">0</span></div>
+        <div><b>Cycles:</b> <span id="cyc" class="mono">0</span></div>
+      </div>
+    </div>
 
-     <div class="s"><input type="file" id="romInput" accept=".bin,.md,.gen" /> <div id="pc">0x0000</div></div>
-    <div class="s">
-    <canvas id="screen" width="320" height="224"></canvas>
-</div>
     <script>
-      class CPU68K {
-        constructor(bus) {
-          this.bus = bus;
-          this.D = new Uint32Array(8); // データレジスタ
-          this.A = new Uint32Array(8); // アドレスレジスタ
-          this.PC = 0;
-          this.SR = 0x2700; // Supervisor + IRQ mask
-          this.opcodeTable = new Array(65536);
-          this.buildOpcodeTable();
-        }
+    "use strict";
 
-        reset() {
-          let initialSP = 0; //this.bus.read32(0);
-          let initialPC = 0x000004; // this.bus.read32(4);
-          this.A[7] = initialSP;
-          this.PC = initialPC;
-          // リセットベクタを読む（0x000000 に初期SP、0x000004 に初期PC）
-          //this.pc = (this.bus.read16(4) << 16) | this.bus.read16(6);
-        }
+    function h8(v)  { return (v&0xff).toString(16).padStart(2,"0"); }
+    function h16(v) { return (v&0xffff).toString(16).padStart(4,"0"); }
+    function h24(v) { return (v&0xffffff).toString(16).padStart(6,"0"); }
+    function h32(v) { return (v>>>0).toString(16).padStart(8,"0"); }
 
-        step() {
-          // まだ命令実装なし
-          let opcode = this.bus.read16(this.PC);
-          this.PC += 2;
-          this.opcodeTable[opcode](opcode);
-          //let opcode = this.bus.read16(this.pc);
-          //console.log("68K opcode:", opcode.toString(16));
-          //this.pc += 2;
-        }
-        checkCondition(cc) {
-          let N = (this.SR >> 3) & 1;
-          let Z = (this.SR >> 2) & 1;
-          let V = (this.SR >> 1) & 1;
-          let C = (this.SR >> 0) & 1;
+    // ═══════════════════════════════════════════════════════════
+    // Mega Drive VDP
+    // Genesis VDP: 320x224 (H40) or 256x224 (H32), 64 colors on screen
+    // ═══════════════════════════════════════════════════════════
+    class VDP {
+      constructor() {
+        this.vram  = new Uint8Array(0x10000);   // 64KB VRAM
+        this.cram  = new Uint16Array(64);        // 64 colors (9-bit: BBBGGGRRRx)
+        this.vsram = new Uint16Array(40);        // Vertical scroll
+        this.regs  = new Uint8Array(24);
 
-          switch (cc) {
-            case 0:
-              return true; // BRA (always)
-            case 1:
-              return false; // BSR (handled separately)
-            case 2:
-              return !C; // BHI
-            case 3:
-              return C; // BLS
-            case 4:
-              return !C && !Z; // BCC
-            case 5:
-              return C || Z; // BCS
-            case 6:
-              return !Z; // BNE
-            case 7:
-              return Z; // BEQ
-            case 8:
-              return !V; // BVC
-            case 9:
-              return V; // BVS
-            case 10:
-              return !N; // BPL
-            case 11:
-              return N; // BMI
-            case 12:
-              return N === V; // BGE
-            case 13:
-              return N !== V; // BLT
-            case 14:
-              return !Z && N === V; // BGT
-            case 15:
-              return Z || N !== V; // BLE
-          }
-          return false;
-        }
-        opMOVE(op) {
-          const sizeBits = (op >> 12) & 0x03;
-          let size = 0;
-          if (sizeBits === 1)
-            size = 1; // MOVE.B
-          else if (sizeBits === 3)
-            size = 2; // MOVE.W
-          else if (sizeBits === 2) size = 4; // MOVE.L
+        // Control port state
+        this.ctrlWord   = 0;
+        this.ctrlFlag   = false;   // second word pending
+        this.addrReg    = 0;
+        this.codeReg    = 0;       // CD bits
 
-          const srcMode = (op >> 3) & 7;
-          const srcReg = op & 7;
-          const dstMode = (op >> 6) & 7;
-          const dstReg = (op >> 9) & 7;
+        // Status register bits
+        this.status = 0x3400;     // always-set bits (FIFO empty, etc.)
+        this.vblankFlag  = false;
+        this.hblankFlag  = false;
+        this.intPending  = false;
+        this.hint_counter = 0;
 
-          const src = this.decodeEA(srcMode, srcReg, size);
-          const dst = this.decodeEA(dstMode, dstReg, size);
+        this.scanline  = 0;
+        this.hcyc      = 0;
+        this.frameCount= 0;
+        this.dmaFill   = false;
+        this.dmaFillData = 0;
 
-          const val = src.read();
-          dst.write(val);
+        // Output buffer 320x224
+        this.WIDTH  = 320;
+        this.HEIGHT = 224;
+        this.out = new Uint32Array(this.WIDTH * this.HEIGHT);
 
-          this.updateNZ(val, size);
-        }
-        opMOVEQ(op) {
-          const reg = (op >> 9) & 7;
-          let imm = op & 0xff;
-          if (imm & 0x80) imm |= 0xffffff00; // sign extend
+        // DMA
+        this.dmaLength  = 0;
+        this.dmaSource  = 0;
+        this.dmaDest    = 0;
+        this.dmaMode    = 0;
 
-          this.D[reg] = imm;
+        this.bus = null; // set after construction
+      }
 
-          this.updateNZ(imm, 4);
-        }
-        opADD(op) {
-          const size = [1, 2, 4][(op >> 6) & 3];
-          const srcMode = (op >> 3) & 7;
-          const srcReg = op & 7;
-          const dstReg = (op >> 9) & 7;
+      // ── Color conversion: MD 9-bit (0BGR BBB GGG RRR) → ARGB32 ──
+      _cramColor(idx) {
+        const c = this.cram[idx & 63];
+        // MD color: bits [8:6]=B [5:3]=G [2:0]=R, each 0-7 → 0-255
+        const r = (c & 0x00E) >>> 1;
+        const g = (c & 0x0E0) >>> 5;
+        const b = (c & 0xE00) >>> 9;
+        // Scale 0-7 to 0-255
+        return 0xff000000 |
+               ((b * 36) & 0xff) |
+               (((g * 36) & 0xff) << 8) |
+               (((r * 36) & 0xff) << 16);
+      }
 
-          const src = this.decodeEA(srcMode, srcReg, size);
-          const s = src.read();
-          const d =
-            this.D[dstReg] &
-            (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
+      // ── VRAM helpers ──
+      _vramW(addr) {
+        return (this.vram[(addr) & 0xffff] << 8) | this.vram[(addr+1) & 0xffff];
+      }
 
-          const r =
-            (d + s) & (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
-          this.D[dstReg] = (this.D[dstReg] & ~((1 << (size * 8)) - 1)) | r;
-
-          this.updateNZ(r, size);
-        }
-        opSUB(op) {
-          const size = [1, 2, 4][(op >> 6) & 3];
-          const srcMode = (op >> 3) & 7;
-          const srcReg = op & 7;
-          const dstReg = (op >> 9) & 7;
-
-          const src = this.decodeEA(srcMode, srcReg, size);
-          const s = src.read();
-          const d =
-            this.D[dstReg] &
-            (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
-
-          const r =
-            (d - s) & (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
-          this.D[dstReg] = (this.D[dstReg] & ~((1 << (size * 8)) - 1)) | r;
-
-          this.updateNZ(r, size);
-        }
-        opCMP(op) {
-          const size = [1, 2, 4][(op >> 6) & 3];
-          const srcMode = (op >> 3) & 7;
-          const srcReg = op & 7;
-          const dstReg = (op >> 9) & 7;
-
-          const src = this.decodeEA(srcMode, srcReg, size);
-          const s = src.read();
-          const d =
-            this.D[dstReg] &
-            (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
-
-          const r =
-            (d - s) & (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
-
-          this.updateNZ(r, size);
-        }
-        opCLR(op) {
-          const size = [1, 2, 4][(op >> 6) & 3];
-          const mode = (op >> 3) & 7;
-          const reg = op & 7;
-
-          const ea = this.decodeEA(mode, reg, size);
-          ea.write(0);
-
-          this.updateNZ(0, size);
-        }
-        opTST(op) {
-          const size = [1, 2, 4][(op >> 6) & 3];
-          const mode = (op >> 3) & 7;
-          const reg = op & 7;
-
-          const ea = this.decodeEA(mode, reg, size);
-          const val = ea.read();
-
-          this.updateNZ(val, size);
-        }
-        opLEA(op) {
-          const reg = (op >> 9) & 7;
-          const mode = (op >> 3) & 7;
-          const r = op & 7;
-
-          const ea = this.decodeEA(mode, r, 4);
-          const addr = ea.address; // decodeEA に address を持たせる
-
-          this.A[reg] = addr;
-        }
-        opPEA(op) {
-          const mode = (op >> 3) & 7;
-          const reg = op & 7;
-
-          const ea = this.decodeEA(mode, reg, 4);
-          const addr = ea.address;
-
-          this.A[7] -= 4;
-          this.bus.write32(this.A[7], addr);
-        }
-        opLSL(op) {
-          const size = [1, 2, 4][(op >> 6) & 3];
-          const reg = op & 7;
-
-          let val =
-            this.D[reg] &
-            (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
-          val =
-            (val << 1) & (size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff);
-
-          this.D[reg] = (this.D[reg] & ~((1 << (size * 8)) - 1)) | val;
-
-          this.updateNZ(val, size);
-        }
-
-        opBcc(op) {
-          let cc = (op >> 8) & 0x0f;
-          let disp8 = op & 0xff;
-
-          // 8bit displacement は signed
-          if (disp8 === 0) {
-            // 16bit displacement
-            disp8 = this.bus.read16(this.PC);
-            this.PC += 2;
-            if (disp8 & 0x8000) disp8 |= 0xffff0000;
-          } else {
-            if (disp8 & 0x80) disp8 |= 0xffffff00;
-          }
-
-          // BSR（cc=1）は特別扱い
-          if (cc === 1) {
-            // push return address
-            this.A[7] -= 4;
-            this.bus.write32(this.A[7], this.PC);
-            this.PC += disp8;
+      // ── Control port write ──
+      writeCtrl(val) {
+        val &= 0xffff;
+        if (!this.ctrlFlag) {
+          // check if it's a register write (top 2 bits = 10)
+          if ((val & 0xC000) === 0x8000) {
+            const r = (val >> 8) & 0x1f;
+            const v = val & 0xff;
+            if (r < 24) this.regs[r] = v;
+            this.ctrlFlag = false;
             return;
           }
+          this.ctrlWord = val;
+          this.ctrlFlag = true;
+        } else {
+          this.ctrlFlag = false;
+          const code = ((val >> 2) & 0x3C) | ((this.ctrlWord >> 14) & 0x03);
+          const addr = ((val & 0x3) << 14) | (this.ctrlWord & 0x3fff);
+          this.codeReg = code;
+          this.addrReg = addr;
 
-          // BRA / Bcc
-          if (this.checkCondition(cc)) {
-            this.PC += disp8;
+          // DMA trigger
+          if (code & 0x20) {
+            this._startDMA();
           }
         }
-        opJSR(op) {
-          let mode = (op >> 3) & 7;
-          let reg = op & 7;
+      }
 
-          let ea = this.decodeEA(mode, reg, 4);
-          let addr = ea.read();
+      writeCtrlByte(val) {
+        // 8-bit access to control port (just treat as high byte of word)
+        // Some games write bytes; handle as lower byte of next word
+        this.writeCtrl(val & 0xff);
+      }
 
-          // push return address
-          this.A[7] -= 4;
-          this.bus.write32(this.A[7], this.PC);
-
-          this.PC = addr;
-        }
-        opRTS(op) {
-          let ret = this.bus.read32(this.A[7]);
-          this.A[7] += 4;
-          this.PC = ret;
-        }
-
-        buildOpcodeTable() {
-    for (let i = 0; i < 65536; i++) {
-        this.opcodeTable[i] = this.opIllegal.bind(this);
-    }
-
-    // --- BRA / BSR / Bcc ---
-    for (let cc = 0; cc < 16; cc++) {
-        for (let disp = 0; disp < 256; disp++) {
-            let op = 0x6000 | (cc << 8) | disp;
-            this.opcodeTable[op] = this.opBcc.bind(this);
-        }
-    }
-
-    // --- JSR ---
-    for (let mode = 0; mode < 8; mode++) {
-        for (let reg = 0; reg < 8; reg++) {
-            let op = 0x4e80 | (mode << 3) | reg;
-            this.opcodeTable[op] = this.opJSR.bind(this);
-        }
-    }
-
-    // --- RTS ---
-    this.opcodeTable[0x4e75] = this.opRTS.bind(this);
-
-    // --- MOVE.B/W/L (必要な EA のみ) ---
-    const sizes = [1,2,4];
-    const sizeBits = [1,3,2]; // B=01, W=11, L=10
-
-    for (let s = 0; s < 3; s++) {
-        for (let dstMode of [0,1,2,3,4,7]) {
-            for (let dstReg = 0; dstReg < 8; dstReg++) {
-                for (let srcMode of [0,1,2,3,4,7]) {
-                    for (let srcReg = 0; srcReg < 8; srcReg++) {
-
-                        let op =
-                            (sizeBits[s] << 12) |
-                            (dstReg << 9) |
-                            (dstMode << 6) |
-                            (srcMode << 3) |
-                            srcReg;
-
-                        this.opcodeTable[op] = this.opMOVE.bind(this);
-                    }
-                }
-            }
-        }
-    }
-
-    // --- ADDQ / SUBQ / CLR / TST / CMP なども後で追加 ---
-}
-
-
-        // ============================
-        // Addressing Mode Decoder
-        // ============================
-decodeEA(mode, reg, size) {
-    const read = (addr) => {
-        if (size === 1) return this.bus.read8(addr);
-        if (size === 2) return this.bus.read16(addr);
-        if (size === 4) return this.bus.read32(addr);
-    };
-
-    const write = (addr, v) => {
-        if (size === 1) this.bus.write8(addr, v);
-        else if (size === 2) this.bus.write16(addr, v);
-        else if (size === 4) this.bus.write32(addr, v);
-    };
-
-    switch (mode) {
-
-        // -------------------------
-        // 0: Dn
-        // -------------------------
-        case 0:
-            return {
-                address: null,
-                read: () => {
-                    const mask = size === 1 ? 0xFF : size === 2 ? 0xFFFF : 0xFFFFFFFF;
-                    return this.D[reg] & mask;
-                },
-                write: (v) => {
-                    if (size === 1) {
-                        this.D[reg] = (this.D[reg] & 0xFFFFFF00) | (v & 0xFF);
-                    } else if (size === 2) {
-                        this.D[reg] = (this.D[reg] & 0xFFFF0000) | (v & 0xFFFF);
-                    } else {
-                        this.D[reg] = v >>> 0;
-                    }
-                }
-            };
-
-        // -------------------------
-        // 1: An
-        // -------------------------
-        case 1:
-            return {
-                address: null,
-                read: () => this.A[reg],
-                write: (v) => { this.A[reg] = v >>> 0; }
-            };
-
-        // -------------------------
-        // 2: (An)
-        // -------------------------
-        case 2:
-            return {
-                address: this.A[reg],
-                read: () => read(this.A[reg]),
-                write: (v) => write(this.A[reg], v)
-            };
-
-        // -------------------------
-        // 3: (An)+
-        // -------------------------
-        case 3: {
-            const addr = this.A[reg];
-            return {
-                address: addr,
-                read: () => {
-                    const v = read(addr);
-                    this.A[reg] += size;
-                    return v;
-                },
-                write: (v) => {
-                    write(addr, v);
-                    this.A[reg] += size;
-                }
-            };
-        }
-
-        // -------------------------
-        // 4: -(An)
-        // -------------------------
-        case 4:
-            return {
-                address: this.A[reg] - size,
-                read: () => {
-                    this.A[reg] -= size;
-                    return read(this.A[reg]);
-                },
-                write: (v) => {
-                    this.A[reg] -= size;
-                    write(this.A[reg], v);
-                }
-            };
-
-        // -------------------------
-        // 5: d16(An)
-        // -------------------------
-        case 5: {
-            const disp = this.bus.read16(this.PC);
-            this.PC += 2;
-            const addr = (this.A[reg] + (disp << 16 >> 16)) >>> 0;
-            return {
-                address: addr,
-                read: () => read(addr),
-                write: (v) => write(addr, v)
-            };
-        }
-
-        // -------------------------
-        // 7: absolute 32bit
-        // -------------------------
-        case 7:
-            if (reg === 1) { // absolute long
-                const addr = this.bus.read32(this.PC) >>> 0;
-                this.PC += 4;
-                return {
-                    address: addr,
-                    read: () => read(addr),
-                    write: (v) => write(addr, v)
-                };
-            }
+      // ── Data port ──
+      writeData(val) {
+        this.ctrlFlag = false;
+        const inc = this.regs[15];
+        switch (this.codeReg & 0x0F) {
+          case 0x1: // VRAM write
+            this.vram[this.addrReg & 0xffff] = (val >> 8) & 0xff;
+            this.vram[(this.addrReg+1) & 0xffff] = val & 0xff;
             break;
-    }
-
-    // 未実装 EA
-    return {
-        address: null,
-        read: () => 0,
-        write: () => {}
-    };
-}
-
-        // ============================
-        // MOVE.W
-        // ============================
-        opMOVE_W(op) {
-          let srcMode = (op >> 3) & 7;
-          let srcReg = op & 7;
-          let dstReg = (op >> 9) & 7;
-
-          let src = this.decodeEA(srcMode, srcReg, 2);
-          let val = src.read();
-
-          this.D[dstReg] = (this.D[dstReg] & 0xffff0000) | (val & 0xffff);
-
-          this.updateNZ(val, 2);
+          case 0x3: // CRAM write
+            this.cram[this.addrReg & 63] = val & 0xEEE;
+            break;
+          case 0x5: // VSRAM write
+            this.vsram[this.addrReg & 39] = val & 0x7ff;
+            break;
         }
-
-        // ============================
-        // ADD.W Dn, Dn
-        // ============================
-        opADD_W(op) {
-          let src = op & 7;
-          let dst = (op >> 9) & 7;
-
-          let s = this.D[src] & 0xffff;
-          let d = this.D[dst] & 0xffff;
-
-          let r = (d + s) & 0xffff;
-          this.D[dst] = (this.D[dst] & 0xffff0000) | r;
-
-          this.updateNZ(r, 2);
-          // 本来は X, C, V も更新
+        if (this.dmaFill && (this.codeReg & 0x0f) === 0x1) {
+          // DMA fill triggered
+          this._doDMAFill(val);
         }
+        this.addrReg = (this.addrReg + inc) & 0xffff;
+      }
 
-        // ============================
-        // Illegal Instruction
-        // ============================
-        opIllegal(op) {}
+      readData() {
+        this.ctrlFlag = false;
+        const inc = this.regs[15];
+        let val = 0;
+        switch (this.codeReg & 0x0F) {
+          case 0x0: // VRAM read
+            val = this._vramW(this.addrReg);
+            break;
+          case 0x8: // CRAM read
+            val = this.cram[this.addrReg & 63];
+            break;
+          case 0x4: // VSRAM read
+            val = this.vsram[this.addrReg & 39];
+            break;
+        }
+        this.addrReg = (this.addrReg + inc) & 0xffff;
+        return val;
+      }
 
-        // ============================
-        // CCR Update
-        // ============================
-        updateNZ(val, size) {
-          let mask = size === 2 ? 0x8000 : 0x80000000;
-          let zero = val === 0;
+      readStatus() {
+        this.ctrlFlag = false;
+        let s = this.status;
+        if (this.vblankFlag) s |= 0x08;
+        if (this.hblankFlag) s |= 0x04;
+        s &= ~0x0200; // DMA not busy for simplicity
+        return s;
+      }
 
-          // Clear N/Z
-          this.SR &= ~0x04; // Z
-          this.SR &= ~0x08; // N
+      // ── DMA ──
+      _startDMA() {
+        if (!(this.regs[1] & 0x10)) return; // DMA disabled
+        const mode = (this.regs[23] >> 6) & 3;
+        this.dmaLength = ((this.regs[20] << 8) | this.regs[19]) & 0xffff;
+        if (this.dmaLength === 0) this.dmaLength = 0x10000;
+        this.dmaSource = ((this.regs[23] & 0x7f) << 17) | (this.regs[22] << 9) | (this.regs[21] << 1);
 
-          if (zero) this.SR |= 0x04;
-          if (val & mask) this.SR |= 0x08;
+        if (mode === 0 || mode === 1) {
+          // 68K → VRAM/CRAM/VSRAM
+          this._doDMAFromBus(mode);
+        } else if (mode === 2) {
+          // VRAM fill (triggered on next data write)
+          this.dmaFill = true;
+        } else if (mode === 3) {
+          // VRAM copy
+          this._doDMACopy();
         }
       }
-      class CPUZ80 {
-        constructor(bus) {
-          this.bus = bus;
-          this.pc = 0;
-        }
 
-        reset() {
-          this.pc = 0x0000;
-        }
-
-        step() {
-          let opcode = this.bus.read8(this.pc);
-
-          this.pc += 1;
-        }
-      }
-      class VDP {
-        constructor(ctx, bus) {
-          this.ctx = ctx;
-          this.bus = bus;
-
-          this.vram = new Uint8Array(0x10000); // 64KB
-          this.cram = new Uint8Array(0x80); // 128B
-          this.vsram = new Uint8Array(0x50); // 80B
-          this.reg = new Uint8Array(0x20); // 24 registers
-this.controlLatch = 0;
-this.controlCount = 0;
-
-          this.controlWord = 0;
-          this.address = 0;
-          this.code = 0;
-          this.vdp = null;
-          this.imageData = ctx.createImageData(320, 224);
-        }
-        connectVDP(vdp) {
-          this.vdp = vdp;
-        }
-        reset() {
-          this.controlWord = 0;
-          this.address = 0;
-          this.code = 0;
-        }
-
-        // ============================
-        // VDP ポート読み書き
-        // ============================
-        readPort(port) {
-          if (port === 4) {
-            return 0x3400; // VDP status (最低限)
+      _doDMAFromBus(mode) {
+        if (!this.bus) return;
+        const inc = this.regs[15];
+        let src = this.dmaSource & 0xffffff;
+        let dst = this.addrReg;
+        for (let i = 0; i < this.dmaLength; i++) {
+          const val = this.bus.read16(src & 0xfffffe);
+          src += 2;
+          switch (this.codeReg & 0x0f) {
+            case 0x1: this.vram[dst & 0xffff] = (val >> 8); this.vram[(dst+1) & 0xffff] = val & 0xff; break;
+            case 0x3: this.cram[dst & 63] = val & 0xEEE; break;
+            case 0x5: this.vsram[dst & 39] = val & 0x7ff; break;
           }
-          return 0;
+          dst = (dst + inc) & 0xffff;
+        }
+        this.addrReg = dst;
+      }
+
+      _doDMAFill(fillVal) {
+        this.dmaFill = false;
+        const inc = this.regs[15];
+        let dst = this.addrReg;
+        const hi = (fillVal >> 8) & 0xff;
+        const lo = fillVal & 0xff;
+        for (let i = 0; i < this.dmaLength; i++) {
+          this.vram[(dst ^ 1) & 0xffff] = hi;
+          dst = (dst + inc) & 0xffff;
+        }
+        this.addrReg = dst;
+      }
+
+      _doDMACopy() {
+        const inc = this.regs[15];
+        let src = this.dmaSource & 0xffff;
+        let dst = this.addrReg;
+        for (let i = 0; i < this.dmaLength; i++) {
+          this.vram[dst & 0xffff] = this.vram[src & 0xffff];
+          src++;
+          dst = (dst + inc) & 0xffff;
+        }
+        this.addrReg = dst;
+      }
+
+      // ── Rendering ──
+      _renderLine(sl) {
+        if (sl >= this.HEIGHT) return;
+        const base = sl * this.WIDTH;
+        const r1 = this.regs[1];
+        const dispOn = (r1 & 0x40) !== 0;
+
+        if (!dispOn) {
+          const bg = this._cramColor(0);
+          for (let x = 0; x < this.WIDTH; x++) this.out[base + x] = bg;
+          return;
         }
 
-        writePort(port, val) {
-          val &= 0xff; // データポート
-          if (port === 0) {
-            switch (this.code) {
-              case 1: // VRAM write
-                this.vram[this.address & 0xffff] = val;
-                this.address = (this.address + 1) & 0xffff;
-                break;
-              case 2: // CRAM write
-                this.cram[this.address & 0x7f] = val;
-                this.address = (this.address + 1) & 0xffff;
-                break;
-              case 3: // VSRAM write
-                this.vsram[this.address & 0x7f] = val;
-                this.address = (this.address + 1) & 0xffff;
-                break;
+        // Read VDP registers
+        const hcellMode = (this.regs[12] & 0x01) !== 0; // 1=H40 (320px), 0=H32 (256px)
+        const W = hcellMode ? 40 : 32;
+        const cellW = hcellMode ? 320 : 256;
+
+        // Name table addresses
+        const ntA    = (this.regs[2] & 0x38) << 10;  // Scroll A
+        const ntWin  = (this.regs[3] & 0x3e) << 10;  // Window
+        const ntB    = (this.regs[4] & 0x07) << 13;  // Scroll B
+        const satBase= (this.regs[5] & 0x7e) << 9;   // Sprite Attribute Table
+        const htBase = (this.regs[13] & 0x3f) << 10; // HScroll table
+
+        // Scroll sizes
+        const hScrMode = this.regs[11] & 0x03;
+        const vScrMode = (this.regs[11] >> 2) & 0x01;
+        const planeW_cells = [32, 64, 0, 128][this.regs[16] & 0x03];
+        const planeH_cells = [32, 64, 0, 128][(this.regs[16] >> 4) & 0x03];
+        const pW = planeW_cells || 32;
+        const pH = planeH_cells || 32;
+
+        // Background color (palette 0, color 0)
+        const bgColor = this._cramColor(0);
+
+        // Fill with background
+        for (let x = 0; x < this.WIDTH; x++) this.out[base + x] = bgColor;
+
+        // ── Helper: draw a plane line ──
+        const drawPlane = (ntBase, hscroll, vscroll_base) => {
+          for (let col = 0; col < W; col++) {
+            // Per-column vertical scroll (VSRAM)
+            const vscroll = vScrMode ? this.vsram[col & 39] : this.vsram[0];
+            const scrolledY = (sl + (vscroll & 0x7ff)) & (pH * 8 - 1);
+            const tileRow = scrolledY >> 3;
+            const pixelRow = scrolledY & 7;
+
+            const scrolledX = (col * 8 - hscroll) & (pW * 8 - 1);
+            const tileCol = scrolledX >> 3;
+            const pixelCol = scrolledX & 7;
+
+            // Cell entry in name table (2 bytes)
+            const ntOff = ((tileRow % pH) * pW + (tileCol % pW)) * 2;
+            const cell = this._vramW((ntBase + ntOff) & 0xffff);
+
+            const patIdx  = cell & 0x7ff;
+            const hflip   = (cell >> 11) & 1;
+            const vflip   = (cell >> 12) & 1;
+            const palette = (cell >> 13) & 3;
+            const priority= (cell >> 15) & 1;
+
+            const pr = vflip ? 7 - pixelRow : pixelRow;
+            const pc = hflip ? 7 - pixelCol : pixelCol;
+
+            // 4bpp tile data: 4 bytes per row, each byte = 2 pixels
+            const tileBase = patIdx * 32 + pr * 4;
+            const byteIdx  = tileBase + (pc >> 1);
+            const nibble   = (pc & 1) ? (this.vram[byteIdx & 0xffff] & 0x0f)
+                                       : (this.vram[byteIdx & 0xffff] >> 4);
+
+            if (nibble !== 0) {
+              const cramIdx = palette * 16 + nibble;
+              const px = col * 8 + (scrolledX & 7);
+              if (px >= 0 && px < this.WIDTH)
+                this.out[base + col * 8 + (pixelCol ^ (hflip ? 7 : 0))] = this._cramColor(cramIdx);
             }
-            return;
-          } // コントロールポート
-          if (port === 4) {
-            this.controlLatch = ((this.controlLatch << 8) | val) & 0xffff;
-            this.controlCount++;
-            if (this.controlCount === 2) {
-              this.controlCount = 0; // レジスタ書き込み？
-              if (this.controlLatch & 0x8000) {
-                const code = (this.controlLatch >> 14) & 3;
-                const addr = this.controlLatch & 0x3fff;
-                if (code === 0) {
-                  // レジスタ書き込み: 1rrrrddd dddddddd
-                  const regNum = (this.controlLatch >> 8) & 0x1f;
-                  const data = this.controlLatch & 0xff;
-                  if (regNum < this.reg.length) this.reg[regNum] = data;
-                } else {
-                  this.code = code;
-                  this.address = addr;
-                }
+          }
+        };
+
+        // ── H-scroll ──
+        let hscrollA = 0, hscrollB = 0;
+        if (hScrMode === 0) {
+          // Full screen scroll
+          hscrollA = this._vramW(htBase) & 0x3ff;
+          hscrollB = this._vramW(htBase + 2) & 0x3ff;
+        } else if (hScrMode === 2) {
+          // Per-cell
+          const cellRow = sl >> 3;
+          hscrollA = this._vramW(htBase + cellRow * 4) & 0x3ff;
+          hscrollB = this._vramW(htBase + cellRow * 4 + 2) & 0x3ff;
+        } else if (hScrMode === 3) {
+          // Per-line
+          hscrollA = this._vramW(htBase + sl * 4) & 0x3ff;
+          hscrollB = this._vramW(htBase + sl * 4 + 2) & 0x3ff;
+        }
+
+        // Draw planes B (low priority) then A (high priority)
+        drawPlane(ntB, hscrollB, 0);
+        drawPlane(ntA, hscrollA, 0);
+
+        // ── Window plane ──
+        const winH = (this.regs[17] & 0x1f) * 8;
+        const winRight = (this.regs[17] & 0x80) !== 0;
+        const winV = (this.regs[18] & 0x1f) * 8;
+        const winDown = (this.regs[18] & 0x80) !== 0;
+        const inWinV = winDown ? sl >= winV : sl < winV;
+        if (winH > 0 || inWinV) {
+          const winRow = sl >> 3;
+          const winPixRow = sl & 7;
+          for (let col = 0; col < W; col++) {
+            const inWinH = winRight ? (col * 8 >= winH) : (col * 8 < winH);
+            if (!inWinV && !inWinH) continue;
+            const ntOff = (winRow * W + col) * 2;
+            const cell = this._vramW((ntWin + ntOff) & 0xffff);
+            const patIdx  = cell & 0x7ff;
+            const hflip   = (cell >> 11) & 1;
+            const vflip   = (cell >> 12) & 1;
+            const palette = (cell >> 13) & 3;
+            const pr = vflip ? 7 - winPixRow : winPixRow;
+            for (let pc2 = 0; pc2 < 8; pc2++) {
+              const pc = hflip ? 7 - pc2 : pc2;
+              const tileBase = patIdx * 32 + pr * 4;
+              const byteIdx  = tileBase + (pc >> 1);
+              const nibble   = (pc & 1) ? (this.vram[byteIdx & 0xffff] & 0x0f)
+                                         : (this.vram[byteIdx & 0xffff] >> 4);
+              if (nibble !== 0) {
+                const cramIdx = palette * 16 + nibble;
+                const px = col * 8 + pc2;
+                if (px >= 0 && px < this.WIDTH) this.out[base + px] = this._cramColor(cramIdx);
               }
             }
           }
         }
 
-        // ============================
-        // 1フレーム描画（BG A のみ）
-        // ============================
-        getColor(palIndex, colorIndex) {
-          const idx = (palIndex * 16 + colorIndex) * 2;
-          const lo = this.cram[idx] || 0;
-          const hi = this.cram[idx + 1] || 0;
-          const word = (hi << 8) | lo;
-          const r = (word & 0x00e) >> 1;
-          const g = (word & 0x0e0) >> 5;
-          const b = (word & 0xe00) >> 9; // 0–7 → 0–255
-          return [(r * 255) / 7, (g * 255) / 7, (b * 255) / 7];
+        // ── Sprites ──
+        // Read sprite attribute table
+        const maxSprites = hcellMode ? 80 : 64;
+        let sprCount = 0;
+        let link = 0;
+        const sprOnLine = [];
+
+        for (let s = 0; s < maxSprites; s++) {
+          const sOff = satBase + link * 8;
+          const yPos = (this._vramW(sOff) & 0x1ff) - 128;
+          const sizeW = ((this._vramW(sOff + 2) >> 2) & 0x03) + 1;
+          const sizeH = (this._vramW(sOff + 2) & 0x03) + 1;
+          const sprH = sizeH * 8;
+          const sprW = sizeW * 8;
+          const row = sl - yPos;
+          if (row >= 0 && row < sprH) {
+            const xPos  = (this._vramW(sOff + 6) & 0x1ff) - 128;
+            const cell2 = this._vramW(sOff + 4);
+            sprOnLine.push({ xPos, yPos, sizeW, sizeH, row, cell: cell2 });
+            if (++sprCount >= 20) break; // max per line
+          }
+          link = this._vramW(sOff + 2) & 0x7f;
+          if (link === 0 || link >= maxSprites) break;
         }
-        renderFrame() {
-          console.log("VRAM[0..64] =", this.vram.slice(0, 64)); console.log("CRAM[0..16] =", this.cram.slice(0, 16)); console.log("reg2 =", this.reg[2]);
-          const w = 320;
-          const h = 224;
-          const data = this.imageData.data; // Plane A ネームテーブルベース（reg2）
-          const planeABase = (this.reg[2] & 0x38) << 10; // bits 5-3, *0x400
-          for (let y = 0; y < h; y++) {
-            const tileY = (y >> 3) & 0x1f; // 32 tiles
-            const py = y & 7;
-            for (let x = 0; x < w; x++) {
-              const tileX = (x >> 3) & 0x3f; // 64 tiles
-              const px = x & 7;
-              const ntIndex = tileY * 64 + tileX;
-              const ntAddr = planeABase + (ntIndex << 1);
-              const lo = this.vram[ntAddr & 0xffff];
-              const hi = this.vram[(ntAddr + 1) & 0xffff];
-              const entry = (hi << 8) | lo;
-              const tileIndex = entry & 0x7ff;
-              const pal = (entry >> 13) & 3;
-              const hflip = (entry >> 11) & 1;
-              const vflip = (entry >> 12) & 1;
-              let tx = px;
-              let ty = py;
-              if (hflip) tx = 7 - tx;
-              if (vflip) ty = 7 - ty;
-              const tileBase = tileIndex * 32; // 8x8x4bpp = 32 bytes
-              const rowAddr = tileBase + ty * 4;
-              const b0 = this.vram[(rowAddr + 0) & 0xffff];
-              const b1 = this.vram[(rowAddr + 1) & 0xffff];
-              const b2 = this.vram[(rowAddr + 2) & 0xffff];
-              const b3 = this.vram[(rowAddr + 3) & 0xffff];
-              const bit = 7 - tx;
-              const c =
-                (((b0 >> bit) & 1) << 0) |
-                (((b1 >> bit) & 1) << 1) |
-                (((b2 >> bit) & 1) << 2) |
-                (((b3 >> bit) & 1) << 3);
-              const [r, g, b] = c === 0 ? [0, 0, 0] : this.getColor(pal, c);
-              const idx = (y * w + x) * 4;
-              data[idx] = r;
-              data[idx + 1] = g;
-              data[idx + 2] = b;
-              data[idx + 3] = 255;
+
+        // Draw sprites (back to front)
+        for (let si = sprOnLine.length - 1; si >= 0; si--) {
+          const sp = sprOnLine[si];
+          const patIdx  = sp.cell & 0x7ff;
+          const hflip   = (sp.cell >> 11) & 1;
+          const vflip   = (sp.cell >> 12) & 1;
+          const palette = (sp.cell >> 13) & 3;
+          const sprRow  = vflip ? (sp.sizeH * 8 - 1 - sp.row) : sp.row;
+          const tileRow = sprRow >> 3;
+          const pixRow  = sprRow & 7;
+
+          for (let col2 = 0; col2 < sp.sizeW * 8; col2++) {
+            const px = sp.xPos + col2;
+            if (px < 0 || px >= this.WIDTH) continue;
+            const tileCol2 = col2 >> 3;
+            const pixCol2  = col2 & 7;
+            const tc = hflip ? (sp.sizeW - 1 - tileCol2) : tileCol2;
+            const pc2 = hflip ? 7 - pixCol2 : pixCol2;
+            const tileIdx = patIdx + tileCol2 + tileRow * sp.sizeW;
+            const tileBase2 = (tileIdx) * 32 + pixRow * 4;
+            const byteIdx2  = tileBase2 + (pc2 >> 1);
+            const nibble2   = (pc2 & 1) ? (this.vram[byteIdx2 & 0xffff] & 0x0f)
+                                         : (this.vram[byteIdx2 & 0xffff] >> 4);
+            if (nibble2 !== 0) {
+              const cramIdx = palette * 16 + nibble2;
+              this.out[base + px] = this._cramColor(cramIdx);
             }
           }
-          this.ctx.putImageData(this.imageData, 0, 0);
         }
       }
 
-      class Bus {
-        constructor() {
-          this.rom = new Uint8Array(0);
-          this.ram68k = new Uint8Array(0x10000); // FF0000-FFFFFF (64KB)
-          this.z80ram = new Uint8Array(0x2000); // A00000-A01FFF (8KB)
-
-          this.vdp = null; // 後で VDP インスタンスを渡す
-          this.io = new Uint8Array(0x20); // A10000-A1001F
-        }
-
-        connectVDP(vdp) {
-          this.vdp = vdp;
-        }
-
-        loadROM(data) {
-          this.rom = data;
-        }
-
-        // ============================
-        // 8bit Read
-        // ============================
-        read8(addr) {
-          addr &= 0xffffff;
-
-          // ROM 0x000000 - 0x3FFFFF
-          if (addr < this.rom.length) {
-            return this.rom[addr];
+      tick(cyc) {
+        // 3420 pixels per scanline at master clock (53.69MHz / 15 = ~3.58MHz pixel clock)
+        // Approx: 488 68k cycles per scanline
+        const CPL = 488;
+        this.hcyc += cyc;
+        let vint = 0;
+        while (this.hcyc >= CPL) {
+          this.hcyc -= CPL;
+          const sl = this.scanline;
+          if (sl < this.HEIGHT) {
+            this._renderLine(sl);
           }
-
-          // 68K RAM 0xFF0000 - 0xFFFFFF
-          if (addr >= 0xff0000) {
-            return this.ram68k[addr & 0xffff];
+          // H-blank interrupt
+          if (sl <= this.HEIGHT) {
+            this.hint_counter--;
+            if (this.hint_counter < 0) {
+              this.hint_counter = this.regs[10];
+              if (this.regs[0] & 0x10) {
+                this.intPending = true; // level 4
+              }
+            }
+          } else {
+            this.hint_counter = this.regs[10];
           }
-
-          // Z80 RAM 0xA00000 - 0xA01FFF
-          if (addr >= 0xa00000 && addr <= 0xa01fff) {
-            return this.z80ram[addr & 0x1fff];
+          // V-blank at scanline 224
+          if (sl === this.HEIGHT) {
+            this.vblankFlag = true;
+            this.status |= 0x08;
+            if (this.regs[1] & 0x20) {
+              vint = 1;
+            }
           }
-
-          // IO 0xA10000 - 0xA1001F
-          if (addr >= 0xa10000 && addr <= 0xa1001f) {
-            return this.io[addr & 0x1f];
+          if (sl === 261) {
+            this.vblankFlag = false;
+            this.status &= ~0x08;
+            this.frameCount++;
           }
-
-          // VDP 0xC00000 - 0xC0001F
-          // ============================
-// 8bit Read
-// ============================
-if (addr >= 0xc00000 && addr <= 0xc0001f) {
-    const port = (addr & 0x1f) & ~1;   // ★ 偶数に丸める
-    return this.vdp ? this.vdp.readPort(port) : 0;
-}
-
-
-          return 0;
+          this.scanline = (this.scanline + 1) % 262;
         }
+        return vint;
+      }
 
-        // ============================
-        // 16bit Read
-        // ============================
-        read16(addr) {
-          return (this.read8(addr) << 8) | this.read8(addr + 1);
+      flush(imgData) {
+        const d = imgData.data;
+        for (let i = 0; i < this.WIDTH * this.HEIGHT; i++) {
+          const c = this.out[i];
+          const p = i * 4;
+          d[p]   = (c >> 16) & 0xff;
+          d[p+1] = (c >> 8)  & 0xff;
+          d[p+2] =  c        & 0xff;
+          d[p+3] = 0xff;
         }
+      }
+    }
 
-        // ============================
-        // 32bit Read
-        // ============================
-        read32(addr) {
-          return (this.read16(addr) << 16) | this.read16(addr + 2);
-        }
+    // ═══════════════════════════════════════════════════════════
+    // YM2612 stub (FM sound – simplified register write only)
+    // ═══════════════════════════════════════════════════════════
+    class YM2612 {
+      constructor() {
+        this.regs = new Uint8Array(0x200);
+        this.addrPort0 = 0;
+        this.addrPort1 = 0;
+      }
+      writeAddr0(v) { this.addrPort0 = v; }
+      writeData0(v) { this.regs[this.addrPort0] = v; }
+      writeAddr1(v) { this.addrPort1 = v; }
+      writeData1(v) { this.regs[0x100 | this.addrPort1] = v; }
+      read() { return 0x00; } // not busy
+    }
 
-        // ============================
-        // 8bit Write
-        // ============================
-        write8(addr, val) {
-          addr &= 0xffffff;
-          val &= 0xff;
+    // ═══════════════════════════════════════════════════════════
+    // SN76489 PSG stub
+    // ═══════════════════════════════════════════════════════════
+    class PSG {
+      constructor() { this.latch = 0; }
+      write(v) { /* stub */ }
+    }
 
-          // 68K RAM
-          if (addr >= 0xff0000) {
-            this.ram68k[addr & 0xffff] = val;
-            return;
-          }
+    // ═══════════════════════════════════════════════════════════
+    // Z80 sub-CPU (sound CPU) – minimal stub
+    // ═══════════════════════════════════════════════════════════
+    class Z80Sub {
+      constructor() {
+        this.ram    = new Uint8Array(0x2000);
+        this.rom    = null;
+        this.pc     = 0;
+        this.sp     = 0xffff;
+        this.a = 0; this.f = 0;
+        this.b = 0; this.c = 0;
+        this.d = 0; this.e = 0;
+        this.h = 0; this.l = 0;
+        this.halted = true;
+        this.reset_pending = true;
+        this.bus_req = false;
+        this.cyc = 0;
+      }
+      reset()  { this.pc = 0; this.halted = false; this.reset_pending = false; }
+      requestBus(v) { this.bus_req = v; }
+      step()   { /* minimal: just burn cycles */ this.cyc += 4; }
+    }
 
-          // Z80 RAM
-          if (addr >= 0xa00000 && addr <= 0xa01fff) {
-            this.z80ram[addr & 0x1fff] = val;
-            return;
-          }
+    // ═══════════════════════════════════════════════════════════
+    // Joypad (6-button MD controller)
+    // ═══════════════════════════════════════════════════════════
+    const BTN_UP=0, BTN_DOWN=1, BTN_LEFT=2, BTN_RIGHT=3;
+    const BTN_A=4, BTN_B=5, BTN_C=6, BTN_START=7;
+    const BTN_X=8, BTN_Y=9, BTN_Z=10, BTN_MODE=11;
 
-          // IO
-          if (addr >= 0xa10000 && addr <= 0xa1001f) {
-            this.io[addr & 0x1f] = val;
-            return;
-          }
+    class Joypad {
+      constructor() {
+        this.buttons = 0xfff; // all released (active low)
+        this.ctrl = 0x40;     // TH high = normal, TH low = extra
+        this.thState = 1;
+        this.counter = 0;
+      }
+      press(b)   { this.buttons &= ~(1 << b); }
+      release(b) { this.buttons |=  (1 << b); }
 
-          // VDP
-          // ============================
-// 8bit Write
-// ============================
-if (addr >= 0xc00000 && addr <= 0xc0001f) {
-    const port = (addr & 0x1f) & ~1;   // ★ 偶数に丸める
-    if (this.vdp) this.vdp.writePort(port, val);
-    return;
-}
-
-        }
-
-        // ============================
-        // 16bit Write
-        // ============================
-        write16(addr, val) {
-          this.write8(addr, val >> 8);
-          this.write8(addr + 1, val & 0xff);
-        }
-
-        // ============================
-        // 32bit Write
-        // ============================
-        write32(addr, val) {
-          this.write16(addr, val >> 16);
-          this.write16(addr + 2, val & 0xffff);
+      read() {
+        // TH controls which data is output
+        if (this.thState) {
+          // TH=1: Up Down Left Right B C
+          return 0x40 | ((this.buttons >> 0) & 0x0f) |
+                        (((this.buttons >> 5) & 1) << 4) |   // B
+                        (((this.buttons >> 6) & 1) << 5);    // C
+        } else {
+          // TH=0: Up Down 0 0 A Start
+          return 0x00 | ((this.buttons >> 0) & 0x03) |
+                        (((this.buttons >> 4) & 1) << 4) |   // A
+                        (((this.buttons >> 7) & 1) << 5);    // Start
         }
       }
 
-      let canvas = document.getElementById("screen");
-      let ctx = canvas.getContext("2d");
+      write(val) {
+        this.thState = (val >> 6) & 1;
+      }
+    }
 
-      let bus = new Bus();
-      let cpu68k = new CPU68K(bus);
-      let cpuZ80 = new CPUZ80(bus);
-      let vdp = new VDP(ctx, bus);
+    // ═══════════════════════════════════════════════════════════
+    // Mega Drive Bus / Memory Map
+    // 0x000000-0x3FFFFF  ROM (up to 4MB)
+    // 0xA00000-0xA0FFFF  Z80 RAM / sound
+    // 0xA10000-0xA1001F  I/O (controllers)
+    // 0xA11000-0xA11200  Z80 bus/reset
+    // 0xC00000-0xC0001F  VDP (even/odd addresses)
+    // 0xE00000-0xFFFFFF  68K RAM (64KB, mirrored)
+    // ═══════════════════════════════════════════════════════════
+    class Bus {
+      constructor(rom, vdp, ym2612, psg, joy1, joy2, z80) {
+        this.rom    = rom;
+        this.vdp    = vdp;
+        this.ym2612 = ym2612;
+        this.psg    = psg;
+        this.joy1   = joy1;
+        this.joy2   = joy2;
+        this.z80    = z80;
+        this.ram    = new Uint8Array(0x10000);  // 64KB work RAM
 
-      document
-        .getElementById("romInput")
-        .addEventListener("change", async (e) => {
-          let file = e.target.files[0];
-          let buffer = await file.arrayBuffer();
-          bus.loadROM(new Uint8Array(buffer));
-          reset();
-        });
+        // I/O control registers
+        this.ioctrl = new Uint8Array(0x20);
+        this.iodata = new Uint8Array(0x20);
+        this.ioctrl[0] = 0x00; // controller 1 data
+        this.ioctrl[1] = 0x00; // controller 2 data
 
-      function reset() {
-        cpu68k.reset();
-        cpuZ80.reset();
-        for (let i = 0; i < 32; i++) vdp.vram[i] = 0xff; vdp.cram[2] = 0x0e; vdp.cram[3] = 0x0e; vdp.vram[0] = 0x00; vdp.vram[1] = 0x00;
-        vdp.reset();
-        // タイル0を全部「色1」にする
-
-
-        frame();
+        vdp.bus = this;
       }
 
-      function frame() {
-        // MegaDrive は 1 フレーム ≒ 60Hz
-        // 1フレーム中に 68000 と Z80 を一定サイクル回す
-        for (let i = 0; i < 200000; i++) cpu68k.step();
-        for (let i = 0; i < 50000; i++) cpuZ80.step();
-        document.getElementById("pc").textContent = cpu68k.PC.toString(16);
-        // タイル0を全部「色1」にする
-
-
-        vdp.renderFrame();
-        requestAnimationFrame(frame);
+      read16(addr) {
+        addr &= 0xfffffe; // word-align
+        const hi = this.read8(addr);
+        const lo = this.read8(addr + 1);
+        return (hi << 8) | lo;
       }
+
+      write16(addr, val) {
+        addr &= 0xfffffe;
+        this.write8(addr,   (val >> 8) & 0xff);
+        this.write8(addr+1,  val & 0xff);
+      }
+
+      read8(addr) {
+        addr &= 0xffffff;
+
+        // ROM
+        if (addr < 0x400000) {
+          return addr < this.rom.length ? this.rom[addr] : 0xff;
+        }
+        // Z80 RAM window (A00000-A0FFFF)
+        if (addr >= 0xa00000 && addr <= 0xa0ffff) {
+          if (addr < 0xa02000) return this.z80.ram[addr & 0x1fff];
+          return 0xff;
+        }
+        // I/O
+        if (addr >= 0xa10000 && addr <= 0xa1001f) {
+          return this._readIO(addr & 0x1f);
+        }
+        // Z80 bus/reset
+        if (addr >= 0xa11000 && addr <= 0xa11fff) {
+          if (addr === 0xa11100 || addr === 0xa11101) return this.z80.bus_req ? 0x01 : 0x00;
+          return 0xff;
+        }
+        // TMSS register
+        if (addr === 0xa14000 || addr === 0xa14001) return 0xff;
+        // VDP
+        if (addr >= 0xc00000 && addr <= 0xc0001f) {
+          return this._readVDP(addr);
+        }
+        // 68K RAM (E00000-FFFFFF)
+        if (addr >= 0xe00000) {
+          return this.ram[addr & 0xffff];
+        }
+        return 0xff;
+      }
+
+      write8(addr, val) {
+        addr &= 0xffffff; val &= 0xff;
+        if (addr >= 0x400000 && addr < 0xa00000) return; // open bus
+        if (addr >= 0xa00000 && addr <= 0xa0ffff) {
+          if (addr < 0xa02000) this.z80.ram[addr & 0x1fff] = val;
+          return;
+        }
+        if (addr >= 0xa10000 && addr <= 0xa1001f) { this._writeIO(addr & 0x1f, val); return; }
+        if (addr >= 0xa11000 && addr <= 0xa11fff) {
+          if (addr === 0xa11100) { this.z80.requestBus(val & 1); return; }
+          if (addr === 0xa11200) { if (!(val & 1)) this.z80.reset(); return; }
+          return;
+        }
+        if (addr === 0xa14000) return; // TMSS
+        if (addr >= 0xc00000 && addr <= 0xc0001f) { this._writeVDP(addr, val); return; }
+        if (addr >= 0xe00000) { this.ram[addr & 0xffff] = val; return; }
+      }
+
+      _readVDP(addr) {
+        const a = addr & 0x1f;
+        if (a <= 0x03) {
+          // Data port
+          if ((a & 1) === 0) return (this.vdp.readData() >> 8) & 0xff;
+          return this.vdp.readData() & 0xff;
+        }
+        if (a >= 0x04 && a <= 0x07) {
+          const s = this.vdp.readStatus();
+          if ((a & 1) === 0) return (s >> 8) & 0xff;
+          return s & 0xff;
+        }
+        if (a === 0x08 || a === 0x09) return 0; // H counter
+        if (a === 0x0a || a === 0x0b) return 0; // V counter
+        return 0xff;
+      }
+
+      _writeVDP(addr, val) {
+        const a = addr & 0x1f;
+        if (a === 0x11 || a === 0x13 || a === 0x15 || a === 0x17) {
+          this.psg.write(val); return;
+        }
+        // VDP data port (C00000-C00003)
+        if (a <= 0x03) {
+          if (a <= 0x01) {
+            // write16 to data
+            if (a === 0) this._pendingDataHi = val;
+            else this.vdp.writeData((this._pendingDataHi << 8) | val);
+          } else {
+            // control port
+            if (a === 2) this._pendingCtrlHi = val;
+            else this.vdp.writeCtrl((this._pendingCtrlHi << 8) | val);
+          }
+          return;
+        }
+        // 16-bit control writes via byte addresses
+        if (a >= 0x04 && a <= 0x07) {
+          if (a === 4) this._pendingCtrlHi = val;
+          else if (a === 5) this.vdp.writeCtrl((this._pendingCtrlHi << 8) | val);
+        }
+        // YM2612
+        if (a >= 0x10 && a <= 0x17) {
+          const sub = a & 0x07;
+          if (sub === 0) this.ym2612.writeAddr0(val);
+          else if (sub === 1) this.ym2612.writeData0(val);
+          else if (sub === 2) this.ym2612.writeAddr1(val);
+          else if (sub === 3) this.ym2612.writeData1(val);
+        }
+      }
+
+      _readIO(a) {
+        // a = offset 0x00-0x1F within A10000
+        if (a === 0x01) return 0xa0;     // version register (domestic NTSC MD)
+        if (a === 0x03) return this.joy1.read();
+        if (a === 0x05) return this.joy2.read();
+        if (a === 0x07) return 0xff;     // expansion port
+        return 0xff;
+      }
+
+      _writeIO(a, val) {
+        if (a === 0x03) { this.joy1.write(val); return; }
+        if (a === 0x05) { this.joy2.write(val); return; }
+        // direction registers etc: ignore
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Motorola 68000 CPU
+    // Full implementation: all addressing modes, all instructions
+    // ═══════════════════════════════════════════════════════════
+    class M68K {
+      constructor(bus) {
+        this.bus = bus;
+        this.d  = new Int32Array(8);   // D0-D7
+        this.a  = new Int32Array(8);   // A0-A7 (A7=SSP in supervisor)
+        this.pc = 0;
+        this.sr = 0x2700;   // supervisor, IPL=7
+        this.ssp = 0;       // supervisor stack pointer
+        this.usp = 0;       // user stack pointer
+        this.cyc = 0;
+        this.halted = false;
+        this.pendingIRQ = 0;
+      }
+
+      reset() {
+        this.ssp = this.bus.read16(0) << 16 | this.bus.read16(2);
+        // Actually read as 32-bit
+        this.ssp = this._rl(0);
+        this.pc  = this._rl(4);
+        this.sr  = 0x2700;
+        this.a[7] = this.ssp;
+        this.halted = false;
+        this.cyc = 0;
+      }
+
+      // ── Memory helpers ──
+      _rb(a) { return this.bus.read8(a & 0xffffff); }
+      _rw(a) { return this.bus.read16(a & 0xfffffe); }
+      _rl(a) { return ((this.bus.read16(a & 0xfffffe) << 16) | this.bus.read16((a+2) & 0xfffffe)) | 0; }
+      _wb(a,v) { this.bus.write8(a & 0xffffff, v & 0xff); }
+      _ww(a,v) { this.bus.write16(a & 0xfffffe, v & 0xffff); }
+      _wl(a,v) { this.bus.write16(a & 0xfffffe, (v>>>16)&0xffff); this.bus.write16((a+2)&0xfffffe, v&0xffff); }
+
+      _fetch() { const v = this._rw(this.pc); this.pc = (this.pc + 2) & 0xffffff; return v; }
+      _fetchL() { const v = this._rl(this.pc); this.pc = (this.pc + 4) & 0xffffff; return v; }
+
+      // ── CCR helpers ──
+      get ccr() { return this.sr & 0x1f; }
+      get flagC() { return (this.sr) & 1; }
+      get flagV() { return (this.sr >> 1) & 1; }
+      get flagZ() { return (this.sr >> 2) & 1; }
+      get flagN() { return (this.sr >> 3) & 1; }
+      get flagX() { return (this.sr >> 4) & 1; }
+      get supervisor() { return (this.sr >> 13) & 1; }
+      get ipl() { return (this.sr >> 8) & 7; }
+
+      _setCC(x,n,z,v,c) {
+        this.sr = (this.sr & ~0x1f) | ((x&1)<<4) | ((n&1)<<3) | ((z&1)<<2) | ((v&1)<<1) | (c&1);
+      }
+      _setCCno_x(n,z,v,c) {
+        this.sr = (this.sr & ~0x0f) | ((n&1)<<3) | ((z&1)<<2) | ((v&1)<<1) | (c&1);
+      }
+
+      // ── Effective Address Calculation ──
+      // size: 0=byte, 1=word, 2=long
+      _ea_addr(mode, reg, size) {
+        const szbytes = size === 0 ? 1 : size === 1 ? 2 : 4;
+        switch (mode) {
+          case 0: return null; // Dn
+          case 1: return null; // An
+          case 2: return this.a[reg] & 0xffffff;  // (An)
+          case 3: { // (An)+
+            const addr = this.a[reg] & 0xffffff;
+            const inc = (reg === 7 && size === 0) ? 2 : szbytes;
+            this.a[reg] = (this.a[reg] + inc) | 0;
+            return addr;
+          }
+          case 4: { // -(An)
+            const inc = (reg === 7 && size === 0) ? 2 : szbytes;
+            this.a[reg] = (this.a[reg] - inc) | 0;
+            return this.a[reg] & 0xffffff;
+          }
+          case 5: { // (d16,An)
+            const d = this._fetch(); // signed word
+            return (this.a[reg] + (d > 0x7fff ? d - 0x10000 : d)) & 0xffffff;
+          }
+          case 6: { // (d8,An,Xn)
+            const ext = this._fetch();
+            const xreg = (ext >> 12) & 7;
+            const xlong = (ext >> 11) & 1;
+            const isAddr = (ext >> 15) & 1;
+            const xval = isAddr ? this.a[xreg] : this.d[xreg];
+            const xv = xlong ? xval : (xval << 16 >> 16); // sign-extend if word
+            const d8 = (ext & 0x7f) | ((ext & 0x80) ? -128 : 0);
+            return (this.a[reg] + xv + d8) & 0xffffff;
+          }
+          case 7:
+            switch (reg) {
+              case 0: return this._fetch() & 0xffffff; // (xxx).W
+              case 1: return this._fetchL() & 0xffffff; // (xxx).L
+              case 2: { const d = this._fetch(); const base = this.pc - 2; return (base + (d > 0x7fff ? d - 0x10000 : d)) & 0xffffff; } // (d16,PC)
+              case 3: { // (d8,PC,Xn)
+                const ext2 = this._fetch();
+                const base2 = this.pc - 2;
+                const xreg2 = (ext2 >> 12) & 7;
+                const xlong2 = (ext2 >> 11) & 1;
+                const isAddr2 = (ext2 >> 15) & 1;
+                const xval2 = isAddr2 ? this.a[xreg2] : this.d[xreg2];
+                const xv2 = xlong2 ? xval2 : (xval2 << 16 >> 16);
+                const d82 = (ext2 & 0x7f) | ((ext2 & 0x80) ? -128 : 0);
+                return (base2 + xv2 + d82) & 0xffffff;
+              }
+              case 4: return null; // immediate (fetch inline)
+              default: return null;
+            }
+          default: return null;
+        }
+      }
+
+      _ea_read(mode, reg, size) {
+        if (mode === 0) {
+          const v = this.d[reg];
+          return size === 0 ? (v & 0xff) : size === 1 ? (v & 0xffff) : (v >>> 0);
+        }
+        if (mode === 1) {
+          const v = this.a[reg];
+          return size === 1 ? (v & 0xffff) : (v >>> 0);
+        }
+        if (mode === 7 && reg === 4) {
+          // immediate
+          if (size === 0) { const v = this._fetch(); return v & 0xff; }
+          if (size === 1) { return this._fetch(); }
+          return this._fetchL() >>> 0;
+        }
+        const addr = this._ea_addr(mode, reg, size);
+        if (addr === null) return 0;
+        if (size === 0) return this._rb(addr);
+        if (size === 1) return this._rw(addr);
+        return this._rl(addr) >>> 0;
+      }
+
+      _ea_write(mode, reg, size, val) {
+        if (mode === 0) {
+          const mask = size === 0 ? 0xff : size === 1 ? 0xffff : 0xffffffff;
+          const shift = size === 0 ? 0 : size === 1 ? 0 : 0;
+          if (size === 0) this.d[reg] = (this.d[reg] & ~0xff) | (val & 0xff);
+          else if (size === 1) this.d[reg] = (this.d[reg] & ~0xffff) | (val & 0xffff);
+          else this.d[reg] = val | 0;
+          return;
+        }
+        if (mode === 1) {
+          this.a[reg] = (size === 1) ? (val << 16 >> 16) : (val | 0);
+          return;
+        }
+        const addr = this._ea_addr(mode, reg, size);
+        if (addr === null) return;
+        if (size === 0) this._wb(addr, val);
+        else if (size === 1) this._ww(addr, val);
+        else this._wl(addr, val);
+      }
+
+      // ── Sign extend ──
+      _sx8(v)  { return (v << 24) >> 24; }
+      _sx16(v) { return (v << 16) >> 16; }
+
+      // ── ADD/SUB flags ──
+      _flagsAdd(a, b, res, size) {
+        const msb = size === 0 ? 0x80 : size === 1 ? 0x8000 : 0x80000000;
+        const mask= size === 0 ? 0xff : size === 1 ? 0xffff : 0xffffffff;
+        const c = (res & (mask*2+1)) > mask ? 1 : 0; // unsigned carry
+        const ov = ((~(a ^ b) & (a ^ res)) & msb) ? 1 : 0;
+        const n = (res & msb) ? 1 : 0;
+        const z = (res & mask) === 0 ? 1 : 0;
+        this._setCC(c, n, z, ov, c);
+      }
+      _flagsSub(a, b, res, size) {
+        const msb = size === 0 ? 0x80 : size === 1 ? 0x8000 : 0x80000000;
+        const mask= size === 0 ? 0xff : size === 1 ? 0xffff : 0xffffffff;
+        const c = (b & mask) > (a & mask) ? 1 : 0;
+        const ov = (((a ^ b) & (a ^ res)) & msb) ? 1 : 0;
+        const n = (res & msb) ? 1 : 0;
+        const z = (res & mask) === 0 ? 1 : 0;
+        this._setCC(c, n, z, ov, c);
+      }
+      _flagsLogic(res, size) {
+        const msb = size === 0 ? 0x80 : size === 1 ? 0x8000 : 0x80000000;
+        const mask= size === 0 ? 0xff : size === 1 ? 0xffff : 0xffffffff;
+        const n = (res & msb) ? 1 : 0;
+        const z = (res & mask) === 0 ? 1 : 0;
+        this._setCCno_x(n, z, 0, 0);
+      }
+
+      // ── IRQ handling ──
+      irq(level) {
+        if (level > this.ipl) {
+          this.pendingIRQ = level;
+        }
+      }
+
+      _processIRQ() {
+        if (!this.pendingIRQ) return;
+        const level = this.pendingIRQ;
+        if (level <= this.ipl) { this.pendingIRQ = 0; return; }
+        this.pendingIRQ = 0;
+        this.halted = false;
+        // Push PC and SR to supervisor stack
+        const oldSR = this.sr;
+        this.sr = (this.sr & ~0x0700) | (level << 8) | 0x2000; // supervisor mode, set IPL
+        this.a[7] = (this.a[7] - 4) | 0;
+        this._wl(this.a[7] & 0xffffff, this.pc);
+        this.a[7] = (this.a[7] - 2) | 0;
+        this._ww(this.a[7] & 0xffffff, oldSR);
+        // Vector: level * 4 + 0x60 (auto-vector)
+        const vecAddr = (level + 24) * 4;
+        this.pc = this._rl(vecAddr) & 0xffffff;
+        this.cyc += 44;
+      }
+
+      // ── Single step ──
+      step() {
+        if (this.halted) { this.cyc += 4; return; }
+        if (this.pendingIRQ) this._processIRQ();
+
+        const startPC = this.pc;
+        const op = this._fetch();
+        this.cyc += 4; // base
+
+        const ophi = (op >> 12) & 0xf;
+        const op6  = (op >> 6) & 0x3f;
+        const op3  = op & 0x7;
+        const op9  = (op >> 9) & 0x7;
+        const sz   = (op >> 6) & 0x3;
+
+        switch (ophi) {
+          case 0x0: this._group0(op); break;
+          case 0x1: this._moveByte(op); break;
+          case 0x2: this._moveLong(op); break;
+          case 0x3: this._moveWord(op); break;
+          case 0x4: this._group4(op); break;
+          case 0x5: this._group5(op); break;
+          case 0x6: this._group6(op); break;
+          case 0x7: { // MOVEQ
+            const val = (op & 0xff); // sign extend
+            const sv = (val << 24) >> 24;
+            this.d[op9] = sv;
+            this._flagsLogic(sv, 2);
+            this.cyc += 4; break;
+          }
+          case 0x8: this._group8(op); break;
+          case 0x9: this._group9(op); break;
+          case 0xa: this._groupA(op); break;
+          case 0xb: this._groupB(op); break;
+          case 0xc: this._groupC(op); break;
+          case 0xd: this._groupD(op); break;
+          case 0xe: this._groupE(op); break;
+          case 0xf: this.cyc += 4; break; // F-line (coprocessor, unimplemented)
+          default: this._exception(4, startPC); break;
+        }
+      }
+
+      _exception(vec, addr) {
+        this.halted = false;
+        const oldSR = this.sr;
+        this.sr |= 0x2000;
+        this.a[7] = (this.a[7] - 4) | 0;
+        this._wl(this.a[7] & 0xffffff, addr);
+        this.a[7] = (this.a[7] - 2) | 0;
+        this._ww(this.a[7] & 0xffffff, oldSR);
+        this.pc = this._rl(vec * 4) & 0xffffff;
+        this.cyc += 34;
+      }
+
+      // ── MOVE instructions (groups 1,2,3) ──
+      _moveSz(op, size) {
+        const srcMode = (op >> 3) & 7;
+        const srcReg  = op & 7;
+        const dstReg  = (op >> 9) & 7;
+        const dstMode = (op >> 6) & 7;
+        const val = this._ea_read(srcMode, srcReg, size);
+        if (dstMode === 1) {
+          // MOVEA: sign extend
+          this.a[dstReg] = size === 1 ? this._sx16(val) : (val | 0);
+        } else {
+          this._ea_write(dstMode, dstReg, size, val);
+          this._flagsLogic(val, size);
+        }
+        this.cyc += 4;
+      }
+
+      _moveByte(op) { this._moveSz(op, 0); }
+      _moveLong(op) { this._moveSz(op, 2); }
+      _moveWord(op) { this._moveSz(op, 1); }
+
+      // ── Group 0: Bit/MOVEP/Immediate ──
+      _group0(op) {
+        const reg  = op & 7;
+        const mode = (op >> 3) & 7;
+        const op8  = (op >> 8) & 0xf;
+
+        // Immediate instructions
+        if ((op & 0xff00) === 0x0000 || (op & 0xff00) === 0x0200 ||
+            (op & 0xff00) === 0x0400 || (op & 0xff00) === 0x0600 ||
+            (op & 0xff00) === 0x0a00 || (op & 0xff00) === 0x0c00) {
+          const sz = (op >> 6) & 3;
+          if (sz > 2) { this.cyc += 4; return; }
+          const imm = sz === 2 ? this._fetchL() >>> 0 : this._fetch();
+          const immv = sz === 0 ? (imm & 0xff) : sz === 1 ? (imm & 0xffff) : imm;
+          const dst = this._ea_read(mode, reg, sz);
+          let res;
+          const optype = (op >> 9) & 7;
+          if      (optype === 0) res = (dst + immv) >>> 0;   // ORI
+          else if (optype === 1) res = (dst & immv) >>> 0;   // ANDI
+          else if (optype === 2) res = (dst - immv) >>> 0;   // SUBI
+          else if (optype === 3) res = (dst + immv) >>> 0;   // ADDI
+          else if (optype === 5) res = (dst ^ immv) >>> 0;   // EORI
+          else if (optype === 6) { this._flagsSub(dst, immv, dst-immv, sz); this.cyc+=8; return; } // CMPI
+          else { res = dst; }
+          this._ea_write(mode, reg, sz, res);
+          if (optype === 2 || optype === 6) this._flagsSub(dst, immv, res, sz);
+          else if (optype === 3) this._flagsAdd(dst, immv, res, sz);
+          else this._flagsLogic(res, sz);
+          this.cyc += 8;
+          return;
+        }
+
+        // BTST/BCHG/BCLR/BSET
+        if ((op & 0x0f00) >= 0x0100 && (op & 0x0f00) <= 0x0f00 &&
+            (op & 0x00c0) !== 0x00c0) {
+          const isStatic = (op & 0x0100) === 0;
+          const bitNum = isStatic ? (this._fetch() & 31) : (this.d[(op>>9)&7] & 31);
+          const btype = (op >> 6) & 3;
+          const val = this._ea_read(mode, reg, 1);
+          const bitMask = 1 << (bitNum & (mode === 0 ? 31 : 7));
+          const z = (val & bitMask) ? 0 : 1;
+          this.sr = (this.sr & ~4) | (z << 2);
+          let res = val;
+          if      (btype === 1) res = val ^ bitMask; // BCHG
+          else if (btype === 2) res = val & ~bitMask; // BCLR
+          else if (btype === 3) res = val | bitMask;  // BSET
+          if (btype !== 0) this._ea_write(mode, reg, 1, res);
+          this.cyc += 8; return;
+        }
+
+        // MOVE to/from SR/CCR
+        if (op === 0x40c0 || (op & 0xffc0) === 0x40c0) { // MOVE from SR
+          this._ea_write(mode, reg, 1, this.sr);
+          this.cyc += 6; return;
+        }
+        if ((op & 0xffc0) === 0x44c0) { // MOVE to CCR
+          const v = this._ea_read(mode, reg, 1);
+          this.sr = (this.sr & ~0x1f) | (v & 0x1f);
+          this.cyc += 12; return;
+        }
+        if ((op & 0xffc0) === 0x46c0) { // MOVE to SR
+          if (this.supervisor) {
+            const v = this._ea_read(mode, reg, 1);
+            this.sr = v;
+          }
+          this.cyc += 12; return;
+        }
+
+        this.cyc += 4;
+      }
+
+      // ── Group 4: Misc ──
+      _group4(op) {
+        const mode = (op >> 3) & 7;
+        const reg  = op & 7;
+        const sz   = (op >> 6) & 3;
+
+        // TRAP
+        if ((op & 0xfff0) === 0x4e40) {
+          const vec = op & 0xf;
+          this._exception(32 + vec, this.pc - 2);
+          return;
+        }
+        // RESET
+        if (op === 0x4e70) { this.cyc += 132; return; }
+        // NOP
+        if (op === 0x4e71) { this.cyc += 4; return; }
+        // STOP
+        if (op === 0x4e72) { const imm = this._fetch(); this.sr = imm; this.halted = true; this.cyc += 4; return; }
+        // RTE
+        if (op === 0x4e73) {
+          if (this.supervisor) {
+            this.sr = this._rw(this.a[7] & 0xffffff);
+            this.a[7] = (this.a[7] + 2) | 0;
+            this.pc = this._rl(this.a[7] & 0xffffff) & 0xffffff;
+            this.a[7] = (this.a[7] + 4) | 0;
+          }
+          this.cyc += 20; return;
+        }
+        // RTS
+        if (op === 0x4e75) {
+          this.pc = this._rl(this.a[7] & 0xffffff) & 0xffffff;
+          this.a[7] = (this.a[7] + 4) | 0;
+          this.cyc += 16; return;
+        }
+        // RTR
+        if (op === 0x4e77) {
+          this.sr = (this.sr & ~0x1f) | (this._rw(this.a[7] & 0xffffff) & 0x1f);
+          this.a[7] = (this.a[7] + 2) | 0;
+          this.pc = this._rl(this.a[7] & 0xffffff) & 0xffffff;
+          this.a[7] = (this.a[7] + 4) | 0;
+          this.cyc += 20; return;
+        }
+        // JSR
+        if ((op & 0xffc0) === 0x4e80) {
+          const addr = this._ea_addr(mode, reg, 2);
+          if (addr !== null) {
+            this.a[7] = (this.a[7] - 4) | 0;
+            this._wl(this.a[7] & 0xffffff, this.pc);
+            this.pc = addr;
+          }
+          this.cyc += 18; return;
+        }
+        // JMP
+        if ((op & 0xffc0) === 0x4ec0) {
+          const addr = this._ea_addr(mode, reg, 2);
+          if (addr !== null) this.pc = addr;
+          this.cyc += 8; return;
+        }
+        // LEA
+        if ((op & 0xf1c0) === 0x41c0) {
+          const dn = (op >> 9) & 7;
+          const addr = this._ea_addr(mode, reg, 2);
+          if (addr !== null) this.a[dn] = addr;
+          this.cyc += 4; return;
+        }
+        // PEA
+        if ((op & 0xffc0) === 0x4840) {
+          const addr = this._ea_addr(mode, reg, 2);
+          if (addr !== null) {
+            this.a[7] = (this.a[7] - 4) | 0;
+            this._wl(this.a[7] & 0xffffff, addr);
+          }
+          this.cyc += 12; return;
+        }
+        // MOVEM
+        if ((op & 0xfb80) === 0x4880) {
+          const toMem = (op & 0x0400) === 0;
+          const szL   = (op & 0x0040) !== 0; // long vs word
+          const mask  = this._fetch();
+          let addr = this._ea_addr(mode, reg, szL ? 2 : 1);
+          if (addr === null) addr = this.a[reg] & 0xffffff;
+          const bsz = szL ? 4 : 2;
+          if (toMem) {
+            // predecrement mode: registers in reverse order
+            if (mode === 4) {
+              for (let i = 15; i >= 0; i--) {
+                if (mask & (1 << i)) {
+                  this.a[reg] = (this.a[reg] - bsz) | 0;
+                  const r = i < 8 ? this.d[i] : this.a[i-8];
+                  if (szL) this._wl(this.a[reg] & 0xffffff, r);
+                  else this._ww(this.a[reg] & 0xffffff, r & 0xffff);
+                }
+              }
+            } else {
+              let a2 = addr;
+              for (let i = 0; i < 16; i++) {
+                if (mask & (1 << i)) {
+                  const r = i < 8 ? this.d[i] : this.a[i-8];
+                  if (szL) { this._wl(a2, r); a2 += 4; }
+                  else { this._ww(a2, r & 0xffff); a2 += 2; }
+                }
+              }
+            }
+          } else {
+            let a2 = addr;
+            for (let i = 0; i < 16; i++) {
+              if (mask & (1 << i)) {
+                if (i < 8) {
+                  this.d[i] = szL ? this._rl(a2) : this._sx16(this._rw(a2));
+                } else {
+                  this.a[i-8] = szL ? this._rl(a2) : this._sx16(this._rw(a2));
+                }
+                a2 += bsz;
+              }
+            }
+            if (mode === 3) this.a[reg] = a2 | 0;
+          }
+          this.cyc += 8; return;
+        }
+        // CLR
+        if ((op & 0xff00) === 0x4200) {
+          if (sz <= 2) {
+            this._ea_write(mode, reg, sz, 0);
+            this._setCCno_x(0, 1, 0, 0);
+            this.cyc += 4;
+          }
+          return;
+        }
+        // NEG
+        if ((op & 0xff00) === 0x4400) {
+          if (sz <= 2) {
+            const v = this._ea_read(mode, reg, sz);
+            const res = (-v) >>> 0;
+            this._ea_write(mode, reg, sz, res);
+            this._flagsSub(0, v, res, sz);
+            this.cyc += 4;
+          }
+          return;
+        }
+        // NOT
+        if ((op & 0xff00) === 0x4600) {
+          if (sz <= 2) {
+            const v = this._ea_read(mode, reg, sz);
+            const res = ~v;
+            this._ea_write(mode, reg, sz, res);
+            this._flagsLogic(res, sz);
+            this.cyc += 4;
+          }
+          return;
+        }
+        // TST
+        if ((op & 0xff00) === 0x4a00) {
+          if (sz <= 2) {
+            const v = this._ea_read(mode, reg, sz);
+            this._flagsLogic(v, sz);
+            this.cyc += 4;
+          }
+          return;
+        }
+        // SWAP
+        if ((op & 0xfff8) === 0x4840) {
+          const v = this.d[reg];
+          const res = ((v & 0xffff) << 16) | ((v >>> 16) & 0xffff);
+          this.d[reg] = res;
+          this._flagsLogic(res, 2);
+          this.cyc += 4; return;
+        }
+        // EXT
+        if ((op & 0xfeb8) === 0x4880) {
+          const szExt = (op & 0x40) ? 2 : 1;
+          if (szExt === 1) this.d[reg] = (this.d[reg] & ~0xffff) | ((this._sx8(this.d[reg] & 0xff)) & 0xffff);
+          else this.d[reg] = this._sx16(this.d[reg] & 0xffff);
+          this._flagsLogic(this.d[reg], szExt);
+          this.cyc += 4; return;
+        }
+        // MOVE USP
+        if ((op & 0xfff0) === 0x4e60) {
+          if (op & 8) this.a[reg] = this.usp;
+          else { this.usp = this.a[reg]; }
+          this.cyc += 4; return;
+        }
+        // LINK
+        if ((op & 0xfff8) === 0x4e50) {
+          this.a[7] = (this.a[7] - 4) | 0;
+          this._wl(this.a[7] & 0xffffff, this.a[reg]);
+          this.a[reg] = this.a[7] | 0;
+          const disp = this._sx16(this._fetch());
+          this.a[7] = (this.a[7] + disp) | 0;
+          this.cyc += 16; return;
+        }
+        // UNLK
+        if ((op & 0xfff8) === 0x4e58) {
+          this.a[7] = this.a[reg] | 0;
+          this.a[reg] = this._rl(this.a[7] & 0xffffff) | 0;
+          this.a[7] = (this.a[7] + 4) | 0;
+          this.cyc += 12; return;
+        }
+        // NBCD/TAS/ILLEGAL
+        if ((op & 0xffc0) === 0x4ac0) { // TAS
+          const v = this._rb(this._ea_addr(mode, reg, 0) || 0);
+          this._flagsLogic(v, 0);
+          this.cyc += 4; return;
+        }
+
+        this.cyc += 4;
+      }
+
+      // ── Group 5: ADDQ/SUBQ/Scc/DBcc ──
+      _group5(op) {
+        const mode = (op >> 3) & 7;
+        const reg  = op & 7;
+        const sz   = (op >> 6) & 3;
+        const dn   = (op >> 9) & 7;
+
+        if (sz === 3) {
+          // Scc / DBcc
+          const cond = (op >> 8) & 0xf;
+          const cc = this._evalCond(cond);
+          if (mode === 1) {
+            // DBcc
+            if (!cc) {
+              const cnt = this._sx16(this.d[reg] & 0xffff) - 1;
+              this.d[reg] = (this.d[reg] & ~0xffff) | (cnt & 0xffff);
+              if ((cnt & 0xffff) !== 0xffff) {
+                const disp = this._sx16(this._fetch());
+                this.pc = (this.pc - 2 + disp) & 0xffffff;
+                this.cyc += 10;
+                return;
+              } else this._fetch(); // skip displacement
+            } else this._fetch();
+            this.cyc += 12; return;
+          } else {
+            // Scc
+            this._ea_write(mode, reg, 0, cc ? 0xff : 0x00);
+            this.cyc += 4; return;
+          }
+        }
+
+        // ADDQ / SUBQ
+        let imm = dn; if (imm === 0) imm = 8;
+        const isAdd = (op & 0x0100) === 0;
+        if (mode === 1) {
+          // address register: no flags
+          this.a[reg] = ((this.a[reg]) + (isAdd ? imm : -imm)) | 0;
+          this.cyc += 8; return;
+        }
+        const dst = this._ea_read(mode, reg, sz);
+        const res = isAdd ? (dst + imm) : (dst - imm);
+        this._ea_write(mode, reg, sz, res);
+        if (isAdd) this._flagsAdd(dst, imm, res, sz);
+        else this._flagsSub(dst, imm, res, sz);
+        this.cyc += 4;
+      }
+
+      // ── Group 6: Bcc/BSR/BRA ──
+      _group6(op) {
+        const cond = (op >> 8) & 0xf;
+        let disp = this._sx8(op & 0xff);
+        if (disp === 0) { disp = this._sx16(this._fetch()); this.pc -= 2; const _ = this._fetch(); }
+        else if (disp === -1) { disp = this._fetchL() | 0; } // 32-bit (68020+)
+
+        if (cond === 1) {
+          // BSR
+          this.a[7] = (this.a[7] - 4) | 0;
+          this._wl(this.a[7] & 0xffffff, this.pc);
+          this.pc = (this.pc - (disp === 0 ? 2 : 0) + disp) & 0xffffff;
+          // Recalculate PC correctly
+          this.cyc += 18;
+        } else {
+          const cc = (cond === 0) ? true : this._evalCond(cond);
+          if (cc) {
+            if ((op & 0xff) === 0) { this.pc = (this.pc - 2 + this._sx16(this._rw(this.pc - 2 + 2))) & 0xffffff; }
+            else this.pc = (this.pc + disp - ((op&0xff)===0?2:0)) & 0xffffff;
+            this.cyc += 10;
+          } else {
+            this.cyc += 8;
+          }
+        }
+        this.cyc += 4;
+      }
+
+      _evalCond(cond) {
+        const N = this.flagN, Z = this.flagZ, V = this.flagV, C = this.flagC;
+        switch (cond) {
+          case 0:  return true;     // T
+          case 1:  return false;    // F
+          case 2:  return !C && !Z; // HI
+          case 3:  return C || Z;   // LS
+          case 4:  return !C;       // CC/HS
+          case 5:  return C;        // CS/LO
+          case 6:  return !Z;       // NE
+          case 7:  return Z;        // EQ
+          case 8:  return !V;       // VC
+          case 9:  return V;        // VS
+          case 10: return !N;       // PL
+          case 11: return N;        // MI
+          case 12: return N === V;  // GE
+          case 13: return N !== V;  // LT
+          case 14: return !Z && (N === V);  // GT
+          case 15: return Z || (N !== V);   // LE
+          default: return false;
+        }
+      }
+
+      // ── Group 8: OR/DIV ──
+      _group8(op) {
+        const mode = (op >> 3) & 7;
+        const reg  = op & 7;
+        const sz   = (op >> 6) & 3;
+        const dn   = (op >> 9) & 7;
+
+        if (sz === 3) {
+          // DIVU
+          const divisor = this._ea_read(mode, reg, 1);
+          if (divisor === 0) { this._exception(5, this.pc - 2); return; }
+          const dividend = this.d[dn] >>> 0;
+          const q = Math.floor(dividend / divisor);
+          const r = dividend % divisor;
+          if (q > 0xffff) { this.sr |= 2; this.cyc += 140; return; }
+          this.d[dn] = ((r & 0xffff) << 16) | (q & 0xffff);
+          this._setCCno_x((q>>15)&1, q===0?1:0, 0, 0);
+          this.cyc += 140; return;
+        }
+        if (sz === 7) { // DIVS
+          const divisor = this._sx16(this._ea_read(mode, reg, 1));
+          if (divisor === 0) { this._exception(5, this.pc - 2); return; }
+          const dividend = this.d[dn] | 0;
+          const q = Math.trunc(dividend / divisor);
+          const r = dividend % divisor;
+          if (q > 32767 || q < -32768) { this.sr |= 2; this.cyc += 140; return; }
+          this.d[dn] = ((r & 0xffff) << 16) | (q & 0xffff);
+          this.cyc += 140; return;
+        }
+
+        // OR
+        const src = this._ea_read(mode, reg, sz);
+        let res;
+        if ((op & 0x0100) === 0) {
+          res = (this.d[dn] | src) >>> 0;
+          this.d[dn] = sz === 0 ? (this.d[dn] & ~0xff) | (res & 0xff) :
+                       sz === 1 ? (this.d[dn] & ~0xffff) | (res & 0xffff) : res;
+          this._flagsLogic(res, sz);
+        } else {
+          const dst = this._ea_read(mode, reg, sz);
+          res = (dst | this.d[dn]) >>> 0;
+          this._ea_write(mode, reg, sz, res);
+          this._flagsLogic(res, sz);
+        }
+        this.cyc += 4;
+      }
+
+      // ── Group 9: SUB/SUBA ──
+      _group9(op) {
+        const mode = (op >> 3) & 7;
+        const reg  = op & 7;
+        const sz   = (op >> 6) & 3;
+        const dn   = (op >> 9) & 7;
+
+        if (sz === 3 || sz === 7) {
+          // SUBA
+          const szA = (op & 0x0100) ? 2 : 1;
+          const src = this._ea_read(mode, reg, szA);
+          const sv  = szA === 1 ? this._sx16(src) : (src | 0);
+          this.a[dn] = (this.a[dn] - sv) | 0;
+          this.cyc += 8; return;
+        }
+        const src = this._ea_read(mode, reg, sz);
+        if ((op & 0x0100) === 0) {
+          const dst = this.d[dn];
+          const dstv = sz===0?(dst&0xff):sz===1?(dst&0xffff):(dst>>>0);
+          const res = (dstv - src) | 0;
+          this._ea_write(0, dn, sz, res);
+          this._flagsSub(dstv, src, res, sz);
+        } else {
+          const dst = this._ea_read(mode, reg, sz);
+          const res = (dst - this.d[dn]) | 0;
+          this._ea_write(mode, reg, sz, res);
+          this._flagsSub(dst, this.d[dn], res, sz);
+        }
+        this.cyc += 4;
+      }
+
+      // ── Group A: Line-A ──
+      _groupA(op) { this._exception(10, this.pc - 2); }
+
+      // ── Group B: CMP/EOR ──
+      _groupB(op) {
+        const mode = (op >> 3) & 7;
+        const reg  = op & 7;
+        const sz   = (op >> 6) & 3;
+        const dn   = (op >> 9) & 7;
+
+        if (sz === 3 || (sz === 7 && mode === 1)) {
+          // CMPA
+          const szA = (op & 0x0100) ? 2 : 1;
+          const src = this._ea_read(mode, reg, szA);
+          const sv  = szA === 1 ? this._sx16(src) : (src | 0);
+          const res = this.a[dn] - sv;
+          this._flagsSub(this.a[dn], sv, res, 2);
+          this.cyc += 6; return;
+        }
+        if ((op & 0x0100) === 0) {
+          // CMP
+          const src = this._ea_read(mode, reg, sz);
+          const dst = sz===0?(this.d[dn]&0xff):sz===1?(this.d[dn]&0xffff):(this.d[dn]>>>0);
+          const res = dst - src;
+          this._flagsSub(dst, src, res, sz);
+          this.cyc += 4;
+        } else {
+          if (mode === 1) {
+            // CMPM (An)+ vs (An)+
+            const src = this._ea_read(3, reg, sz); // (An)+
+            const dst = this._ea_read(3, dn, sz);   // (An)+
+            const res = dst - src;
+            this._flagsSub(dst, src, res, sz);
+            this.cyc += 12;
+          } else {
+            // EOR
+            const src = sz===0?(this.d[dn]&0xff):sz===1?(this.d[dn]&0xffff):(this.d[dn]>>>0);
+            const dst = this._ea_read(mode, reg, sz);
+            const res = dst ^ src;
+            this._ea_write(mode, reg, sz, res);
+            this._flagsLogic(res, sz);
+            this.cyc += 4;
+          }
+        }
+      }
+
+      // ── Group C: AND/MUL/ABCD/EXG ──
+      _groupC(op) {
+        const mode = (op >> 3) & 7;
+        const reg  = op & 7;
+        const sz   = (op >> 6) & 3;
+        const dn   = (op >> 9) & 7;
+
+        if (sz === 3) {
+          // MULU
+          const src = this._ea_read(mode, reg, 1);
+          const dst = this.d[dn] & 0xffff;
+          const res = (dst * src) | 0;
+          this.d[dn] = res;
+          this._setCCno_x((res>>31)&1, res===0?1:0, 0, 0);
+          this.cyc += 70; return;
+        }
+        if (sz === 7) {
+          // MULS
+          const src = this._sx16(this._ea_read(mode, reg, 1));
+          const dst = this._sx16(this.d[dn] & 0xffff);
+          const res = (dst * src) | 0;
+          this.d[dn] = res;
+          this._setCCno_x((res>>31)&1, res===0?1:0, 0, 0);
+          this.cyc += 70; return;
+        }
+        // EXG
+        if ((op & 0x01f8) === 0x0140) { const t=this.d[dn]; this.d[dn]=this.d[reg]; this.d[reg]=t; this.cyc+=6; return; }
+        if ((op & 0x01f8) === 0x0148) { const t=this.a[dn]; this.a[dn]=this.a[reg]; this.a[reg]=t; this.cyc+=6; return; }
+        if ((op & 0x01f8) === 0x0188) { const t=this.d[dn]; this.d[dn]=this.a[reg]|0; this.a[reg]=t|0; this.cyc+=6; return; }
+        // ABCD (simplified)
+        if ((op & 0x01f0) === 0x0100) { this.cyc += 6; return; }
+
+        // AND
+        const src = this._ea_read(mode, reg, sz);
+        if ((op & 0x0100) === 0) {
+          const dst = sz===0?(this.d[dn]&0xff):sz===1?(this.d[dn]&0xffff):(this.d[dn]>>>0);
+          const res = (dst & src) >>> 0;
+          this._ea_write(0, dn, sz, res);
+          this._flagsLogic(res, sz);
+        } else {
+          const dst = this._ea_read(mode, reg, sz);
+          const res = (dst & (sz===0?(this.d[dn]&0xff):sz===1?(this.d[dn]&0xffff):(this.d[dn]>>>0))) >>> 0;
+          this._ea_write(mode, reg, sz, res);
+          this._flagsLogic(res, sz);
+        }
+        this.cyc += 4;
+      }
+
+      // ── Group D: ADD/ADDA ──
+      _groupD(op) {
+        const mode = (op >> 3) & 7;
+        const reg  = op & 7;
+        const sz   = (op >> 6) & 3;
+        const dn   = (op >> 9) & 7;
+
+        if (sz === 3 || (sz === 7)) {
+          // ADDA
+          const szA = (sz === 7 || (op & 0x01c0) === 0x01c0) ? 2 : 1;
+          const src = this._ea_read(mode, reg, szA);
+          const sv  = szA === 1 ? this._sx16(src) : (src | 0);
+          this.a[dn] = (this.a[dn] + sv) | 0;
+          this.cyc += 8; return;
+        }
+        const src = this._ea_read(mode, reg, sz);
+        if ((op & 0x0100) === 0) {
+          const dst = sz===0?(this.d[dn]&0xff):sz===1?(this.d[dn]&0xffff):(this.d[dn]>>>0);
+          const res = (dst + src) >>> 0;
+          this._ea_write(0, dn, sz, res);
+          this._flagsAdd(dst, src, res, sz);
+        } else {
+          const dst = this._ea_read(mode, reg, sz);
+          const res = (dst + (sz===0?(this.d[dn]&0xff):sz===1?(this.d[dn]&0xffff):(this.d[dn]>>>0))) >>> 0;
+          this._ea_write(mode, reg, sz, res);
+          this._flagsAdd(dst, this.d[dn]>>>0, res, sz);
+        }
+        this.cyc += 4;
+      }
+
+      // ── Group E: Shift/Rotate ──
+      _groupE(op) {
+        const mode = (op >> 3) & 7;
+        const reg  = op & 7;
+        const sz   = (op >> 6) & 3;
+        const dn   = (op >> 9) & 7;
+        const dir  = (op >> 8) & 1; // 1=left, 0=right
+        const isReg= (op & 0x20) !== 0;
+        const type = (op >> 3) & 3;
+
+        let cnt, val, res;
+
+        if (sz === 3) {
+          // Memory shift (1 bit)
+          const addr = this._ea_addr(mode, reg, 1);
+          if (addr === null) { this.cyc += 8; return; }
+          val = this._rw(addr);
+          cnt = 1;
+          // use type from bits 9-8
+          const t2 = (op >> 9) & 3;
+          res = this._doShift(val, 1, dir, t2, 1);
+          this._ww(addr, res);
+          this.cyc += 8; return;
+        }
+
+        cnt = isReg ? (this.d[dn] & 63) : (dn || 8);
+        val = sz===0?(this.d[reg]&0xff):sz===1?(this.d[reg]&0xffff):(this.d[reg]>>>0);
+        const t2 = (op >> 3) & 3;
+        res = this._doShift(val, cnt, dir, t2, sz);
+        this._ea_write(0, reg, sz, res);
+        this.cyc += 6 + cnt * 2;
+      }
+
+      _doShift(val, cnt, dir, type, sz) {
+        const bits = sz === 0 ? 8 : sz === 1 ? 16 : 32;
+        const msb  = 1 << (bits - 1);
+        const mask = (bits === 32) ? 0xffffffff : (1 << bits) - 1;
+        let res = val, C = 0, V = 0;
+        for (let i = 0; i < cnt; i++) {
+          switch (type) {
+            case 0: // ASd
+              if (dir) { C=(res>>>(bits-1))&1; res=((res<<1)|0)>>>0; }
+              else { C=res&1; const sign=res&msb; res=((res>>>1)|sign)>>>0; }
+              break;
+            case 1: // LSd
+              if (dir) { C=(res>>>(bits-1))&1; res=(res<<1)>>>0; }
+              else { C=res&1; res=(res>>>1)>>>0; }
+              break;
+            case 2: // ROXd
+              if (dir) { const old=this.flagX; C=(res>>>(bits-1))&1; res=((res<<1)|old)>>>0; }
+              else { const old=this.flagX; C=res&1; res=((res>>>1)|(old<<(bits-1)))>>>0; }
+              break;
+            case 3: // ROd
+              if (dir) { C=(res>>>(bits-1))&1; res=((res<<1)|C)>>>0; }
+              else { C=res&1; res=((res>>>1)|(C<<(bits-1)))>>>0; }
+              break;
+          }
+        }
+        res &= mask;
+        const N = (res & msb) ? 1 : 0;
+        const Z = res === 0 ? 1 : 0;
+        this._setCC(C, N, Z, V, C);
+        return res;
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // MAIN
+    // ═══════════════════════════════════════════════════════════
+    const canvas   = document.getElementById("screen");
+    const ctx2d    = canvas.getContext("2d");
+    const imgData  = ctx2d.createImageData(320, 224);
+    const pcEl     = document.getElementById("pc");
+    const statusEl = document.getElementById("status");
+    const fpsEl    = document.getElementById("fps");
+    const fileEl   = document.getElementById("file-name");
+
+    let cpu, bus, vdp, ym2612, psg, joy1, joy2, z80;
+    let running = false, rafId = null;
+
+    // ── Keyboard mapping (MD 3+3 button) ──
+    const KM = {
+      ArrowUp:    BTN_UP,    ArrowDown: BTN_DOWN,
+      ArrowLeft:  BTN_LEFT,  ArrowRight: BTN_RIGHT,
+      z: BTN_A,   Z: BTN_A,
+      x: BTN_B,   X: BTN_B,
+      c: BTN_C,   C: BTN_C,
+      Enter: BTN_START,
+      a: BTN_X,   A: BTN_X,
+      s: BTN_Y,   S: BTN_Y,
+      d: BTN_Z,   D: BTN_Z,
+    };
+
+    window.addEventListener("keydown", e => {
+      if (!joy1) return;
+      const b = KM[e.key];
+      if (b !== undefined) { joy1.press(b); e.preventDefault(); }
+    });
+    window.addEventListener("keyup", e => {
+      if (!joy1) return;
+      const b = KM[e.key];
+      if (b !== undefined) joy1.release(b);
+    });
+
+    // ── ROM loading ──
+    document.getElementById("rom").addEventListener("change", e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      fileEl.textContent = file.name;
+      statusEl.textContent = "Loading...";
+      running = false;
+      if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const rom = new Uint8Array(reader.result);
+        vdp    = new VDP();
+        ym2612 = new YM2612();
+        psg    = new PSG();
+        joy1   = new Joypad();
+        joy2   = new Joypad();
+        z80    = new Z80Sub();
+        bus    = new Bus(rom, vdp, ym2612, psg, joy1, joy2, z80);
+        cpu    = new M68K(bus);
+        cpu.reset();
+        document.getElementById("start").textContent = "Start";
+        statusEl.textContent = "ROM Loaded – Press Start";
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    // ── Start/Pause ──
+    document.getElementById("start").addEventListener("click", () => {
+      if (!bus) { alert("Please load a ROM first."); return; }
+      if (running) {
+        running = false;
+        if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+        statusEl.textContent = "Paused";
+        document.getElementById("start").textContent = "Start";
+      } else {
+        running = true;
+        statusEl.textContent = "Running";
+        document.getElementById("start").textContent = "Pause";
+        loop();
+      }
+    });
+
+    // ── Fullscreen ──
+    document.getElementById("fullscreenBtn").addEventListener("click", () => {
+      if (!document.fullscreenElement) canvas.requestFullscreen();
+      else document.exitFullscreen();
+    });
+
+    // MD: 7.67MHz 68K, 60fps → ~127795 cycles/frame
+    const CYCLES_PER_FRAME = 127795;
+    let fpsFrames = 0, fpsAcc = 0, lastTs = 0;
+
+    function loop() {
+      function frame(ts) {
+        if (!running) return;
+        rafId = requestAnimationFrame(frame);
+
+        const dt = ts - lastTs;
+        lastTs = ts;
+        fpsAcc += dt;
+        fpsFrames++;
+        if (fpsAcc >= 1000) {
+          fpsEl.textContent = fpsFrames;
+          fpsFrames = 0; fpsAcc -= 1000;
+        }
+
+        const target = cpu.cyc + CYCLES_PER_FRAME;
+        try {
+          while (cpu.cyc < target) {
+            const before = cpu.cyc;
+            cpu.step();
+            const elapsed = Math.max(1, (cpu.cyc - before) & 0x7fffffff);
+            const vf = vdp.tick(elapsed);
+            if (vf) {
+              cpu.irq(6); // VBlank = IRQ level 6
+            }
+            if (vdp.intPending) {
+              vdp.intPending = false;
+              cpu.irq(4); // HBlank = IRQ level 4
+            }
+          }
+        } catch (err) {
+          running = false;
+          statusEl.textContent = "Error: " + err.message;
+          document.getElementById("start").textContent = "Start";
+          console.error(err);
+          return;
+        }
+
+        vdp.flush(imgData);
+        ctx2d.putImageData(imgData, 0, 0);
+        pcEl.textContent = "0x" + h24(cpu.pc);
+      }
+      lastTs = performance.now();
+      rafId = requestAnimationFrame(frame);
+    }
     </script>
   </body>
 </html>
