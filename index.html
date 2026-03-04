@@ -810,17 +810,29 @@
         this.halted = false;
         this.cyc = 0;
       }
+_rw(a) { return this.bus.read16(a & 0xffffff); }
+_rl(a) {
+  const hi = this.bus.read16(a & 0xffffff);
+  const lo = this.bus.read16((a + 2) & 0xffffff);
+  return (hi << 16) | lo;
+}
 
       // ── Memory helpers ──
       _rb(a) { return this.bus.read8(a & 0xffffff); }
-      _rw(a) { return this.bus.read16(a & 0xfffffe); }
-      _rl(a) { return ((this.bus.read16(a & 0xfffffe) << 16) | this.bus.read16((a+2) & 0xfffffe)) | 0; }
+      //_rw(a) { return this.bus.read16(a & 0xfffffe); }
+     // _rl(a) { return ((this.bus.read16(a & 0xfffffe) << 16) | this.bus.read16((a+2) & 0xfffffe)) | 0; }
       _wb(a,v) { this.bus.write8(a & 0xffffff, v & 0xff); }
       _ww(a,v) { this.bus.write16(a & 0xfffffe, v & 0xffff); }
       _wl(a,v) { this.bus.write16(a & 0xfffffe, (v>>>16)&0xffff); this.bus.write16((a+2)&0xfffffe, v&0xffff); }
 
       _fetch() { const v = this._rw(this.pc); this.pc = (this.pc + 2) & 0xffffff; return v; }
-      _fetchL() { const v = this._rl(this.pc); this.pc = (this.pc + 4) & 0xffffff; return v; }
+      //_fetchL() { const v = this._rl(this.pc); this.pc = (this.pc + 4) & 0xffffff; return v; }
+_fetchL() {
+  const hi = this._rw(this.pc);       // read16
+  const lo = this._rw(this.pc + 2);   // read16
+  this.pc = (this.pc + 4) & 0xffffff;
+  return (hi << 16) | lo;
+}
 
       // ── CCR helpers ──
       get ccr() { return this.sr & 0x1f; }
@@ -844,7 +856,12 @@
       _ea_addr(mode, reg, size) {
         const szbytes = size === 0 ? 1 : size === 1 ? 2 : 4;
         switch (mode) {
-          case 0: return null; // Dn
+          //case 0: return null; // Dn
+          case 0: { // (xxx).W absolute short
+  const w = this._fetch();
+  return (w & 0x8000) ? (w | 0xffff0000) & 0xffffff
+                      : w & 0xffffff;
+}
           case 1: return null; // An
           case 2: return this.a[reg] & 0xffffff;  // (An)
           case 3: { // (An)+
@@ -1002,7 +1019,7 @@
         const startPC = this.pc;
         const op = this._fetch();
         this.cyc += 4; // base
-
+console.log("OP:"+op.toString(16))
         const ophi = (op >> 12) & 0xf;
         const op6  = (op >> 6) & 0x3f;
         const op3  = op & 0x7;
@@ -1086,11 +1103,16 @@
           const dst = this._ea_read(mode, reg, sz);
           let res;
           const optype = (op >> 9) & 7;
-          if      (optype === 0) res = (dst + immv) >>> 0;   // ORI
-          else if (optype === 1) res = (dst & immv) >>> 0;   // ANDI
-          else if (optype === 2) res = (dst - immv) >>> 0;   // SUBI
-          else if (optype === 3) res = (dst + immv) >>> 0;   // ADDI
-          else if (optype === 5) res = (dst ^ immv) >>> 0;   // EORI
+          if      (optype === 0) res = (dst | immv) >>> 0;   // ORI
+else if (optype === 1) res = (dst & immv) >>> 0;   // ANDI
+else if (optype === 2) res = (dst - immv) >>> 0;   // SUBI
+else if (optype === 3) res = (dst + immv) >>> 0;   // ADDI
+else if (optype === 5) res = (dst ^ immv) >>> 0;   // EORI
+          //if      (optype === 0) res = (dst + immv) >>> 0;   // ORI
+         // else if (optype === 1) res = (dst & immv) >>> 0;   // ANDI
+          //else if (optype === 2) res = (dst - immv) >>> 0;   // SUBI
+          //else if (optype === 3) res = (dst + immv) >>> 0;   // ADDI
+          //else if (optype === 5) res = (dst ^ immv) >>> 0;   // EORI
           else if (optype === 6) { this._flagsSub(dst, immv, dst-immv, sz); this.cyc+=8; return; } // CMPI
           else { res = dst; }
           this._ea_write(mode, reg, sz, res);
@@ -1182,16 +1204,28 @@
           this.a[7] = (this.a[7] + 4) | 0;
           this.cyc += 20; return;
         }
+        if (op === 0x4eb9) { // JSR absolute long
+  const target = this._fetchL();
+
+  this.a[7] = (this.a[7] - 4) >>> 0;
+  this._wl(this.a[7], this.pc);
+
+  this.pc = target & 0xffffff;
+  this.cyc += 20;
+  return;
+}
         // JSR
         if ((op & 0xffc0) === 0x4e80) {
-          const addr = this._ea_addr(mode, reg, 2);
-          if (addr !== null) {
-            this.a[7] = (this.a[7] - 4) | 0;
-            this._wl(this.a[7] & 0xffffff, this.pc);
-            this.pc = addr;
-          }
-          this.cyc += 18; return;
-        }
+  const target = this._ea_read(mode, reg, 2); // ← ここが重要
+
+  this.a[7] = (this.a[7] - 4) >>> 0;
+  this._wl(this.a[7] & 0xffffff, this.pc);
+
+  this.pc = target & 0xffffff;
+
+  this.cyc += 18;
+  return;
+}
         // JMP
         if ((op & 0xffc0) === 0x4ec0) {
           const addr = this._ea_addr(mode, reg, 2);
@@ -1822,6 +1856,7 @@
           while (cpu.cyc < target) {
             const before = cpu.cyc;
             cpu.step();
+            
             const elapsed = Math.max(1, (cpu.cyc - before) & 0x7fffffff);
             const vf = vdp.tick(elapsed);
             if (vf) {
