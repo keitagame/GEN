@@ -1215,17 +1215,23 @@ else if (optype === 5) res = (dst ^ immv) >>> 0;   // EORI
   return;
 }
         // JSR
-        if ((op & 0xffc0) === 0x4e80) {
-  const target = this._ea_read(mode, reg, 2); // ← ここが重要
+      // JSR (d16,PC)
+if ((op & 0xffc0) === 0x4eb0 && (op & 0x3f) === 0x3a) {
+  // extension word をフェッチ（ここで PC は +2 される）
+  const disp = (this._fetch() << 16) >> 16; // sign-extend
 
-  this.a[7] = (this.a[7] - 4) >>> 0;
-  this._wl(this.a[7] & 0xffffff, this.pc);
+  const returnPC = this.pc; // すでに「次の命令」を指している
+  const target   = (this.pc + disp) & 0xffffff;
 
-  this.pc = target & 0xffffff;
+  // push return address
+  this.a[7] = (this.a[7] - 4) & 0xffffff;
+  this._wl(this.a[7], returnPC);
 
+  this.pc = target;
   this.cyc += 18;
   return;
 }
+
         // JMP
         if ((op & 0xffc0) === 0x4ec0) {
           const addr = this._ea_addr(mode, reg, 2);
