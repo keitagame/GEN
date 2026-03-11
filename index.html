@@ -809,6 +809,8 @@
         this.a[7] = this.ssp;
         this.halted = false;
         this.cyc = 0;
+console.log("RESET: SSP=", this.ssp.toString(16), " PC=", this.pc.toString(16));
+
       }
 _rw(a) { return this.bus.read16(a & 0xffffff); }
 _rl(a) {
@@ -1043,7 +1045,7 @@ _processIRQ() {
         const startPC = this.pc;
         const op = this._fetch();
         this.cyc += 4; // base
-console.log("OP:"+op.toString(16))
+//console.log("OP:"+op.toString(16))
         const ophi = (op >> 12) & 0xf;
         const op6  = (op >> 6) & 0x3f;
         const op3  = op & 0x7;
@@ -1110,6 +1112,26 @@ _exception(vec, addr) {
   this.pc = this._rl(vec * 4) & 0xffffff;
   this.cyc += 34;
 }
+_exception(vec, addr) {
+  this.halted = false;
+  const oldSR = this.sr;
+
+  // Sビットを立てる
+  this.sr |= 0x2000;
+
+  // SR
+  this.a[7] = (this.a[7] - 2) & 0xffffff;
+  this._ww(this.a[7], oldSR);
+
+  // PC
+  this.a[7] = (this.a[7] - 4) & 0xffffff;
+  this._wl(this.a[7], addr);
+
+  // ベクタジャンプ
+  this.pc = this._rl(vec * 4) & 0xffffff;
+  this.cyc += 34;
+}
+
 
       // ── MOVE instructions (groups 1,2,3) ──
       _moveSz(op, size) {
@@ -1227,15 +1249,21 @@ else if (optype === 5) res = (dst ^ immv) >>> 0;   // EORI
         // STOP
         if (op === 0x4e72) { const imm = this._fetch(); this.sr = imm; this.halted = true; this.cyc += 4; return; }
         // RTE
-        if (op === 0x4e73) {
-          if (this.supervisor) {
-            this.sr = this._rw(this.a[7] & 0xffffff);
-            this.a[7] = (this.a[7] + 2) | 0;
-            this.pc = this._rl(this.a[7] & 0xffffff) & 0xffffff;
-            this.a[7] = (this.a[7] + 4) | 0;
-          }
-          this.cyc += 20; return;
-        }
+        if (op === 0x4e73) { // RTE
+  const sp = this.a[7] & 0xffffff;
+
+  const newSR = this._rw(sp);
+  const newPC = this._rl((sp + 2) & 0xffffff);
+
+  this.sr = newSR & 0xffff;
+  this.supervisor = !!(this.sr & 0x2000); // 必要なら同期
+  this.a[7] = (sp + 6) & 0xffffff;
+  this.pc = newPC & 0xffffff;
+
+  this.cyc += 20;
+  return;
+}
+
         // RTS
        // if (op === 0x4e75) {
         //  this.pc = this._rl(this.a[7] & 0xffffff) & 0xffffff;
