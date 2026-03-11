@@ -1246,11 +1246,13 @@ else if (optype === 5) res = (dst ^ immv) >>> 0;   // EORI
   const sp = this.a[7] & 0xffffff;
   const newPC = this._rl(sp) & 0xffffff;
   console.log("RTS: SP=", sp.toString(16), " → PC=", newPC.toString(16));
+
   this.pc = newPC;
-  this.a[7] = (this.a[7] + 4) | 0;
+  this.a[7] = (this.a[7] + 4) & 0xffffff;   // ★ これが必要
   this.cyc += 16;
   return;
 }
+
 
         // RTR
        if (op === 0x4e77) { // RTR
@@ -1283,7 +1285,10 @@ if (op === 0x40e7) { this.a[7] = (this.a[7] - 2) & 0xffffff; this._ww(this.a[7],
       // JSR (d16,PC)
 // JSR (d16,PC)
 if ((op & 0xffc0) === 0x4eb0 && (op & 0x3f) === 0x3a) {
-  const disp = (this._fetch() << 16) >> 16; // 符号付き16bit
+const w = this._fetch();        // 0〜65535
+const disp = (w & 0x8000) ? (w - 0x10000) : w;
+
+ // const disp = (this._fetch() << 16) >> 16; // 符号付き16bit
   const returnPC = this.pc;                 // すでに次の命令を指している
   const target   = (this.pc + disp) & 0xffffff;
 
@@ -1339,14 +1344,16 @@ if ((op & 0xfb80) === 0x4880) {
     // レジスタ→メモリ
     if (mode === 4) {
       // predecrement: 逆順で A[reg] を自前で減らす
-      for (let i = 15; i >= 0; i--) {
-        if (mask & (1 << i)) {
-          this.a[reg] = (this.a[reg] - bsz) & 0xffffff;
-          const r = i < 8 ? this.d[i] : this.a[i-8];
-          if (szL) this._wl(this.a[reg], r);
-          else     this._ww(this.a[reg], r & 0xffff);
-        }
-      }
+      // predecrement: 昇順で push
+for (let i = 0; i < 16; i++) {
+  if (mask & (1 << i)) {
+    this.a[reg] = (this.a[reg] - bsz) & 0xffffff;
+    const r = i < 8 ? this.d[i] : this.a[i-8];
+    if (szL) this._wl(this.a[reg], r);
+    else     this._ww(this.a[reg], r & 0xffff);
+  }
+}
+
     } else {
       let a2 = addr;
       for (let i = 0; i < 16; i++) {
